@@ -8,14 +8,40 @@ export default function MergePDF() {
   const [files, setFiles] = useState<any[]>([]);
   const [isProcessing, setIsProcessing] = useState(false);
   const [isComplete, setIsComplete] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
-  const handleProcess = () => {
+  const handleProcess = async () => {
+    const apiBase = import.meta.env.VITE_API_BASE_URL || "http://localhost:4000";
+
     setIsProcessing(true);
-    // Simulate processing
-    setTimeout(() => {
-      setIsProcessing(false);
+    setError(null);
+
+    try {
+      const response = await fetch(`${apiBase}/jobs/merge-pdf`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          fileCount: files.length,
+          // In later phases this will contain uploaded file IDs / locations
+          filenames: files.map((f) => f.name ?? "unknown"),
+        }),
+      });
+
+      if (!response.ok) {
+        throw new Error(`Request failed with status ${response.status}`);
+      }
+
+      const data = await response.json();
+      console.log("Merge job response", data);
       setIsComplete(true);
-    }, 2000);
+    } catch (err: any) {
+      console.error("Error creating merge job", err);
+      setError("Something went wrong while starting the merge. Please try again.");
+    } finally {
+      setIsProcessing(false);
+    }
   };
 
   const handleReset = () => {
@@ -39,6 +65,10 @@ export default function MergePDF() {
               maxFiles={20}
               onFilesChange={setFiles}
             />
+
+            {error && (
+              <p className="mt-4 text-sm text-destructive text-center">{error}</p>
+            )}
 
             {files.length >= 2 && (
               <div className="mt-8 flex flex-col items-center gap-4">

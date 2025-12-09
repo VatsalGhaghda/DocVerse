@@ -30,6 +30,19 @@ app.post("/upload", (req: Request, res: Response) => {
   });
 });
 
+app.post("/jobs/merge-pdf", (req: Request, res: Response) => {
+  // Phase 1 stub: pretend we created a merge job
+  const jobId = `job_merge_${Date.now()}`;
+
+  res.status(202).json({
+    status: "queued",
+    jobId,
+    tool: "merge-pdf",
+    received: req.body ?? null,
+    message: "Merge job accepted (stub). Real merging will be implemented in a later phase.",
+  });
+});
+
 app.listen(PORT, () => {
   console.log(`DocVerse backend listening on port ${PORT}`);
 });
