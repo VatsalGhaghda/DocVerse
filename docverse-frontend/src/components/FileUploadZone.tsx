@@ -1,5 +1,6 @@
-import { useState, useCallback } from "react";
+import { useState, useCallback, useEffect } from "react";
 import { Upload, X, FileText, GripVertical, Plus } from "lucide-react";
+import { PdfThumbnail } from "@/components/PdfThumbnail";
 import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
 import { cn } from "@/lib/utils";
@@ -10,6 +11,7 @@ interface UploadedFile {
   size: number;
   progress: number;
   status: "uploading" | "complete" | "error";
+  file?: File;
 }
 
 interface FileUploadZoneProps {
@@ -29,6 +31,11 @@ export function FileUploadZone({
 }: FileUploadZoneProps) {
   const [files, setFiles] = useState<UploadedFile[]>([]);
   const [isDragging, setIsDragging] = useState(false);
+  const [draggingId, setDraggingId] = useState<string | null>(null);
+
+  useEffect(() => {
+    onFilesChange?.(files);
+  }, [files, onFilesChange]);
 
   const handleDrag = useCallback((e: React.DragEvent) => {
     e.preventDefault();
@@ -56,36 +63,34 @@ export function FileUploadZone({
         size: file.size,
         progress: 0,
         status: "uploading" as const,
+        file,
       }));
 
     // Simulate upload progress
     newFiles.forEach((file, index) => {
       setTimeout(() => {
         const interval = setInterval(() => {
-          setFiles((prev) =>
-            prev.map((f) => {
+          setFiles((prev) => {
+            const updated: UploadedFile[] = prev.map((f) => {
               if (f.id === file.id && f.progress < 100) {
                 const newProgress = Math.min(f.progress + Math.random() * 30, 100);
                 return {
                   ...f,
                   progress: newProgress,
-                  status: newProgress === 100 ? "complete" : "uploading",
+                  status: (newProgress === 100 ? "complete" : "uploading") as UploadedFile["status"],
                 };
               }
               return f;
-            })
-          );
+            });
+            return updated;
+          });
         }, 200);
 
         setTimeout(() => clearInterval(interval), 2000);
       }, index * 300);
     });
 
-    setFiles((prev) => {
-      const updated = [...prev, ...newFiles];
-      onFilesChange?.(updated);
-      return updated;
-    });
+    setFiles((prev) => [...prev, ...newFiles]);
   }, [files.length, maxFiles, onFilesChange]);
 
   const handleDrop = useCallback(
@@ -101,6 +106,39 @@ export function FileUploadZone({
     [processFiles]
   );
 
+  const handleItemDragStart = useCallback(
+    (e: React.DragEvent<HTMLDivElement>, id: string) => {
+      e.dataTransfer.effectAllowed = "move";
+      setDraggingId(id);
+    },
+    []
+  );
+
+  const handleItemDragOver = useCallback(
+    (e: React.DragEvent<HTMLDivElement>, targetId: string) => {
+      e.preventDefault();
+      e.dataTransfer.dropEffect = "move";
+
+      setFiles((prev) => {
+        if (!draggingId || draggingId === targetId) return prev;
+
+        const currentIndex = prev.findIndex((f) => f.id === draggingId);
+        const targetIndex = prev.findIndex((f) => f.id === targetId);
+
+        if (currentIndex === -1 || targetIndex === -1) return prev;
+        const updated = [...prev];
+        const [moved] = updated.splice(currentIndex, 1);
+        updated.splice(targetIndex, 0, moved);
+        return updated;
+      });
+    },
+    [draggingId, onFilesChange]
+  );
+
+  const handleItemDragEnd = useCallback(() => {
+    setDraggingId(null);
+  }, []);
+
   const handleFileInput = useCallback(
     (e: React.ChangeEvent<HTMLInputElement>) => {
       if (e.target.files && e.target.files.length > 0) {
@@ -111,11 +149,7 @@ export function FileUploadZone({
   );
 
   const removeFile = useCallback((id: string) => {
-    setFiles((prev) => {
-      const updated = prev.filter((f) => f.id !== id);
-      onFilesChange?.(updated);
-      return updated;
-    });
+    setFiles((prev) => prev.filter((f) => f.id !== id));
   }, [onFilesChange]);
 
   const formatFileSize = (bytes: number) => {
@@ -189,9 +223,8 @@ export function FileUploadZone({
         </p>
       </div>
 
-      {/* File List */}
       {files.length > 0 && (
-        <div className="mt-6 space-y-3">
+        <div className="mt-6 space-y-4">
           <div className="flex items-center justify-between">
             <h4 className="font-medium">{files.length} file(s) selected</h4>
             <Button
@@ -203,44 +236,59 @@ export function FileUploadZone({
               Add more
             </Button>
           </div>
-          
-          <div className="space-y-2">
+
+          <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
             {files.map((file) => (
               <div
                 key={file.id}
-                className="flex items-center gap-3 rounded-lg border border-border bg-card p-3 transition-all hover:bg-muted/50"
+                className="group relative flex flex-col rounded-xl border border-border bg-card p-3 shadow-sm transition-all hover:shadow-md hover:-translate-y-0.5 cursor-move"
+                draggable
+                onDragStart={(e) => handleItemDragStart(e, file.id)}
+                onDragOver={(e) => handleItemDragOver(e, file.id)}
+                onDragEnd={handleItemDragEnd}
               >
-                <div className="cursor-move text-muted-foreground hover:text-foreground">
-                  <GripVertical className="h-5 w-5" />
+                <div className="absolute left-2 top-2 inline-flex items-center rounded-full bg-muted/90 px-2 py-0.5 text-[11px] font-medium text-foreground shadow-sm">
+                  {formatFileSize(file.size)}
                 </div>
-                <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-primary/10">
-                  <FileText className="h-5 w-5 text-primary" />
-                </div>
-                <div className="flex-1 min-w-0">
-                  <p className="font-medium truncate">{file.name}</p>
-                  <div className="flex items-center gap-2">
-                    <p className="text-sm text-muted-foreground">
-                      {formatFileSize(file.size)}
-                    </p>
-                    {file.status === "uploading" && (
-                      <Progress value={file.progress} className="h-1.5 w-24" />
-                    )}
-                    {file.status === "complete" && (
-                      <span className="text-sm text-secondary">Ready</span>
-                    )}
-                  </div>
-                </div>
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  className="h-8 w-8 text-muted-foreground hover:text-destructive"
+
+                <button
+                  type="button"
+                  className="absolute right-2 top-2 inline-flex h-6 w-6 items-center justify-center rounded-full bg-background/90 text-muted-foreground opacity-0 shadow-sm transition group-hover:opacity-100 hover:text-destructive"
                   onClick={(e) => {
                     e.stopPropagation();
                     removeFile(file.id);
                   }}
                 >
-                  <X className="h-4 w-4" />
-                </Button>
+                  <X className="h-3 w-3" />
+                </button>
+
+                <div className="flex-1 rounded-lg bg-muted/60 flex items-center justify-center mb-2 overflow-hidden">
+                  {file.file && file.file.type === "application/pdf" ? (
+                    <PdfThumbnail file={file.file} />
+                  ) : (
+                    <FileText className="h-10 w-10 text-primary" />
+                  )}
+                </div>
+
+                <div className="min-h-[2.5rem] flex flex-col justify-between">
+                  <p className="text-xs font-medium text-center truncate" title={file.name}>
+                    {file.name}
+                  </p>
+                  <div className="mt-1 flex items-center justify-center gap-2">
+                    {file.status === "uploading" && (
+                      <Progress value={file.progress} className="h-1.5 w-20" />
+                    )}
+                    {file.status === "complete" && (
+                      <span className="text-[11px] font-medium text-secondary">
+                        Ready
+                      </span>
+                    )}
+                  </div>
+                </div>
+
+                <div className="absolute inset-x-0 bottom-1 flex justify-center text-[10px] text-muted-foreground">
+                  <GripVertical className="h-3 w-3" />
+                </div>
               </div>
             ))}
           </div>

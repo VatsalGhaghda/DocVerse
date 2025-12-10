@@ -9,35 +9,68 @@ export default function MergePDF() {
   const [isProcessing, setIsProcessing] = useState(false);
   const [isComplete, setIsComplete] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [downloadUrl, setDownloadUrl] = useState<string | null>(null);
+  const [uploadKey, setUploadKey] = useState(0);
+  const [progress, setProgress] = useState(0);
 
   const handleProcess = async () => {
     const apiBase = import.meta.env.VITE_API_BASE_URL || "http://localhost:4000";
 
     setIsProcessing(true);
     setError(null);
+    setProgress(0);
 
     try {
-      const response = await fetch(`${apiBase}/jobs/merge-pdf`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          fileCount: files.length,
-          // In later phases this will contain uploaded file IDs / locations
-          filenames: files.map((f) => f.name ?? "unknown"),
-        }),
+      const formData = new FormData();
+
+      files.slice(0, 5).forEach((file: any) => {
+        if (file.file) {
+          formData.append("files", file.file, file.name ?? "file.pdf");
+        }
       });
 
-      if (!response.ok) {
-        throw new Error(`Request failed with status ${response.status}`);
-      }
+      await new Promise<void>((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
 
-      const data = await response.json();
-      console.log("Merge job response", data);
-      setIsComplete(true);
+        xhr.open("POST", `${apiBase}/merge-pdf`);
+
+        // Dummy loader: smoothly increase progress up to ~95% while request is in flight
+        const interval = window.setInterval(() => {
+          setProgress((prev) => {
+            if (prev >= 95) {
+              return prev;
+            }
+            const next = prev + 3;
+            return next > 95 ? 95 : next;
+          });
+        }, 150);
+
+        xhr.responseType = "blob";
+
+        xhr.onload = () => {
+          window.clearInterval(interval);
+
+          if (xhr.status >= 200 && xhr.status < 300) {
+            const blob = xhr.response as Blob;
+            const url = URL.createObjectURL(blob);
+            setDownloadUrl(url);
+            setProgress(100);
+            setIsComplete(true);
+            resolve();
+          } else {
+            reject(new Error(`Request failed with status ${xhr.status}`));
+          }
+        };
+
+        xhr.onerror = () => {
+          window.clearInterval(interval);
+          reject(new Error("Network error while uploading files"));
+        };
+
+        xhr.send(formData);
+      });
     } catch (err: any) {
-      console.error("Error creating merge job", err);
+      console.error("Error merging PDFs", err);
       setError("Something went wrong while starting the merge. Please try again.");
     } finally {
       setIsProcessing(false);
@@ -47,7 +80,26 @@ export default function MergePDF() {
   const handleReset = () => {
     setFiles([]);
     setIsComplete(false);
+    if (downloadUrl) {
+      URL.revokeObjectURL(downloadUrl);
+      setDownloadUrl(null);
+    }
+    setUploadKey((prev) => prev + 1);
   };
+
+  const handleDownload = () => {
+    if (!downloadUrl) return;
+    const link = document.createElement("a");
+    link.href = downloadUrl;
+    link.download = "merged.pdf";
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  };
+
+  // Only allow merge when at least 2 files are selected and all are marked as complete ("Ready").
+  const allReady =
+    files.length >= 2 && files.every((file: any) => file.status === "complete");
 
   return (
     <ToolPageLayout
@@ -58,45 +110,54 @@ export default function MergePDF() {
     >
       <div className="mx-auto max-w-3xl">
         {!isComplete ? (
-          <>
-            <FileUploadZone
-              accept=".pdf"
-              multiple
-              maxFiles={20}
-              onFilesChange={setFiles}
-            />
-
-            {error && (
-              <p className="mt-4 text-sm text-destructive text-center">{error}</p>
-            )}
-
-            {files.length >= 2 && (
-              <div className="mt-8 flex flex-col items-center gap-4">
-                <Button
-                  size="lg"
-                  className="btn-hero gradient-primary shadow-primary"
-                  onClick={handleProcess}
-                  disabled={isProcessing}
-                >
-                  {isProcessing ? (
-                    <>
-                      <div className="h-5 w-5 animate-spin rounded-full border-2 border-primary-foreground border-t-transparent" />
-                      Processing...
-                    </>
-                  ) : (
-                    <>
-                      Merge {files.length} PDFs
-                      <ArrowRight className="h-5 w-5" />
-                    </>
-                  )}
-                </Button>
-                <Button variant="ghost" onClick={handleReset}>
-                  <RotateCcw className="h-4 w-4 mr-2" />
-                  Clear all files
-                </Button>
+          isProcessing ? (
+            // Full-width merging screen (similar to iLovePDF style)
+            <div className="py-16 flex flex-col items-center gap-6">
+              <h2 className="text-2xl font-semibold">Merging PDFs...</h2>
+              <div className="relative h-24 w-24">
+                <div className="h-24 w-24 rounded-full border-[6px] border-primary-foreground/10" />
+                <div className="absolute inset-0 rounded-full border-[6px] border-primary border-t-transparent animate-spin" />
+                <div className="absolute inset-0 flex items-center justify-center text-sm font-semibold">
+                  {progress}%
+                </div>
               </div>
-            )}
-          </>
+              {error && (
+                <p className="mt-2 text-sm text-destructive text-center max-w-md">{error}</p>
+              )}
+            </div>
+          ) : (
+            <>
+              <FileUploadZone
+                key={uploadKey}
+                accept=".pdf"
+                multiple
+                maxFiles={5}
+                onFilesChange={setFiles}
+              />
+
+              {error && (
+                <p className="mt-4 text-sm text-destructive text-center">{error}</p>
+              )}
+
+              {files.length >= 2 && (
+                <div className="mt-8 flex flex-col items-center gap-4">
+                  <Button
+                    size="lg"
+                    className="btn-hero gradient-primary shadow-primary"
+                    onClick={handleProcess}
+                    disabled={isProcessing || !allReady}
+                  >
+                    Merge {files.length} PDFs
+                    <ArrowRight className="h-5 w-5" />
+                  </Button>
+                  <Button variant="ghost" onClick={handleReset}>
+                    <RotateCcw className="h-4 w-4 mr-2" />
+                    Clear all files
+                  </Button>
+                </div>
+              )}
+            </>
+          )
         ) : (
           <div className="text-center py-12">
             <div className="mx-auto mb-6 flex h-20 w-20 items-center justify-center rounded-full bg-secondary/10">
@@ -107,7 +168,12 @@ export default function MergePDF() {
               Your PDF files have been successfully merged.
             </p>
             <div className="flex flex-col items-center gap-4">
-              <Button size="lg" className="btn-hero gradient-secondary">
+              <Button
+                size="lg"
+                className="btn-hero gradient-secondary hover:brightness-110 transition"
+                onClick={handleDownload}
+                disabled={!downloadUrl}
+              >
                 <Download className="h-5 w-5 mr-2" />
                 Download Merged PDF
               </Button>
