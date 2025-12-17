@@ -21,6 +21,8 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { ToolPageLayout } from "@/components/ToolPageLayout";
 import { FileUploadZone } from "@/components/FileUploadZone";
 import { PdfPageThumbnail } from "@/components/PdfPageThumbnail";
+import { ToolProcessingState } from "@/components/ToolProcessingState";
+import { xhrUploadForBlob, XhrUploadError } from "@/lib/xhrUpload";
 
 export default function SignPDF() {
   type FieldId = "signature";
@@ -77,6 +79,7 @@ export default function SignPDF() {
   const [progress, setProgress] = useState(0);
   const [textFontFamily, setTextFontFamily] = useState<"helvetica" | "times" | "courier">("helvetica");
   const [textColor, setTextColor] = useState("#000000");
+  const [isMobile, setIsMobile] = useState(false);
   const uploadRef = useRef<HTMLDivElement | null>(null);
   const previewRef = useRef<HTMLDivElement | null>(null);
   const loadingRef = useRef<HTMLDivElement | null>(null);
@@ -88,6 +91,14 @@ export default function SignPDF() {
 
   const [dragPaletteFieldId, setDragPaletteFieldId] = useState<FieldId | null>(null);
   const [dragPos, setDragPos] = useState<{ x: number; y: number } | null>(null);
+
+  useEffect(() => {
+    const mq = window.matchMedia("(max-width: 640px)");
+    const apply = () => setIsMobile(mq.matches);
+    apply();
+    mq.addEventListener?.("change", apply);
+    return () => mq.removeEventListener?.("change", apply);
+  }, []);
 
   const activeFile = files[0]?.file as File | undefined;
   const allReady = files.length === 1 && files[0].status === "complete";
@@ -233,11 +244,11 @@ export default function SignPDF() {
       }
     };
 
-    const onMove = (e: MouseEvent) => {
+    const onMove = (e: PointerEvent) => {
       setDragPos({ x: e.clientX, y: e.clientY });
     };
 
-    const onUp = async (e: MouseEvent) => {
+    const onUp = async (e: PointerEvent) => {
       setDragPaletteFieldId(null);
       setDragPos(null);
       const currentMode = mode;
@@ -308,12 +319,14 @@ export default function SignPDF() {
         }
       }
 
-      window.removeEventListener("mousemove", onMove);
-      window.removeEventListener("mouseup", onUp);
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointercancel", onUp);
     };
 
-    window.addEventListener("mousemove", onMove);
-    window.addEventListener("mouseup", onUp);
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+    window.addEventListener("pointercancel", onUp);
   };
 
   const removePlacement = (fieldId: FieldId, placementId: string) => {
@@ -792,56 +805,26 @@ export default function SignPDF() {
     }
 
     try {
-      await new Promise<void>((resolve, reject) => {
-        const xhr = new XMLHttpRequest();
-        xhr.open("POST", `${apiBase}/sign-pdf`);
-        xhr.responseType = "blob";
-
-        const interval = window.setInterval(() => {
-          setProgress((prev) => {
-            if (prev >= 92) return prev;
-            const next = prev + 4;
-            return next > 92 ? 92 : next;
-          });
-        }, 100);
-
-        xhr.onload = () => {
-          window.clearInterval(interval);
-          if (xhr.status >= 200 && xhr.status < 300) {
-            const blob = xhr.response as Blob;
-            const url = URL.createObjectURL(blob);
-            setDownloadUrl(url);
-            setProgress(100);
-            setIsComplete(true);
-            resolve();
-            return;
-          }
-
-          (async () => {
-            try {
-              const errBlob = xhr.response as Blob;
-              const text = await errBlob.text();
-              const data = JSON.parse(text);
-              if (data && typeof data.message === "string") {
-                setError(data.message);
-              }
-            } catch {
-              // ignore
-            }
-            reject(new Error(`Request failed with status ${xhr.status}`));
-          })();
-        };
-
-        xhr.onerror = () => {
-          window.clearInterval(interval);
-          reject(new Error("Network error while uploading file"));
-        };
-
-        xhr.send(formData);
+      const { blob } = await xhrUploadForBlob({
+        url: `${apiBase}/sign-pdf`,
+        formData,
+        onProgress: (p) => setProgress(p),
+        progressStart: 8,
+        progressCap: 92,
+        progressTickMs: 100,
+        progressTickAmount: 4,
       });
+
+      const url = URL.createObjectURL(blob);
+      setDownloadUrl(url);
+      setIsComplete(true);
     } catch (err) {
       console.error("Error signing PDF", err);
-      setError((prev) => prev || "Something went wrong while signing your PDF. Please try again.");
+      if (err instanceof XhrUploadError) {
+        setError(err.message);
+      } else {
+        setError("Something went wrong while signing your PDF. Please try again.");
+      }
     } finally {
       setIsProcessing(false);
     }
@@ -939,17 +922,13 @@ export default function SignPDF() {
       <div className="mx-auto max-w-7xl">
         {!isComplete ? (
           isProcessing ? (
-            <div ref={loadingRef} className="py-16 flex flex-col items-center gap-6">
-              <h2 className="text-2xl font-semibold">Signing document...</h2>
-              <div className="relative h-24 w-24">
-                <div className="h-24 w-24 rounded-full border-[6px] border-primary-foreground/10" />
-                <div className="absolute inset-0 rounded-full border-[6px] border-primary border-t-transparent animate-spin" />
-                <div className="absolute inset-0 flex items-center justify-center text-sm font-semibold">
-                  {progress}%
-                </div>
-              </div>
-              {error && <p className="mt-2 text-sm text-destructive text-center max-w-md">{error}</p>}
-            </div>
+            <ToolProcessingState
+              containerRef={loadingRef}
+              title="Signing document..."
+              progress={progress}
+              error={error}
+              color="primary"
+            />
           ) : (
             <>
               <div ref={uploadRef}>
@@ -965,9 +944,9 @@ export default function SignPDF() {
               {files.length > 0 && (
                 <div
                   ref={previewRef}
-                  className="mt-8 grid grid-cols-1 lg:grid-cols-[180px,1fr,360px] gap-6 items-start"
+                  className="mt-8 grid grid-cols-1 lg:grid-cols-[180px,1fr,360px] gap-4 sm:gap-6 items-start"
                 >
-                  <div className="rounded-xl border border-border bg-card/0 p-3 max-h-[36rem] overflow-y-auto scroll-slim">
+                  <div className="rounded-xl border border-border bg-card/0 p-3 max-h-[16rem] sm:max-h-[36rem] overflow-y-auto scroll-slim">
                     {activeFile && pageCount ? (
                       <div className="space-y-3">
                         {Array.from({ length: pageCount }, (_, i) => i).map((idx) => {
@@ -996,9 +975,14 @@ export default function SignPDF() {
 
                   <div className="rounded-xl border border-border bg-card/0 p-3">
                     <div className="rounded-xl border border-border bg-background p-3">
-                      <div ref={stageRef} className="relative mx-auto w-full max-w-[760px]">
+                      <div ref={stageRef} className="relative mx-auto w-full max-w-[420px] sm:max-w-[760px] touch-none">
                         {activeFile && (
-                          <PdfPageThumbnail file={activeFile} pageNumber={activePageIndex + 1} width={760} height={980} />
+                          <PdfPageThumbnail
+                            file={activeFile}
+                            pageNumber={activePageIndex + 1}
+                            width={isMobile ? 420 : 760}
+                            height={isMobile ? 540 : 980}
+                          />
                         )}
 
                         {fields
@@ -1019,9 +1003,11 @@ export default function SignPDF() {
                                 return (
                                   <div
                                     key={`${f.id}-${placement.id}`}
-                                    onMouseDown={(e) => {
+                                    onPointerDown={(e) => {
+                                      e.preventDefault();
                                       if (!stageRef.current) return;
                                       setSelectedFieldId(f.id);
+                                      (e.currentTarget as HTMLDivElement).setPointerCapture?.(e.pointerId);
                                       const rect = stageRef.current.getBoundingClientRect();
                                       const startX = e.clientX;
                                       const startY = e.clientY;
@@ -1029,19 +1015,21 @@ export default function SignPDF() {
                                       const startLeft = start.x;
                                       const startTop = start.y;
 
-                                      const onMove = (ev: MouseEvent) => {
+                                      const onMove = (ev: PointerEvent) => {
                                         const dx = (ev.clientX - startX) / rect.width;
                                         const dy = (ev.clientY - startY) / rect.height;
                                         updatePlacement(f.id, placement.id, { x: startLeft + dx, y: startTop + dy });
                                       };
                                       const onUp = () => {
-                                        window.removeEventListener("mousemove", onMove);
-                                        window.removeEventListener("mouseup", onUp);
+                                        window.removeEventListener("pointermove", onMove);
+                                        window.removeEventListener("pointerup", onUp);
+                                        window.removeEventListener("pointercancel", onUp);
                                       };
-                                      window.addEventListener("mousemove", onMove);
-                                      window.addEventListener("mouseup", onUp);
+                                      window.addEventListener("pointermove", onMove);
+                                      window.addEventListener("pointerup", onUp);
+                                      window.addEventListener("pointercancel", onUp);
                                     }}
-                                    className={`absolute rounded-md overflow-visible select-none group ${
+                                    className={`absolute rounded-md overflow-visible select-none group touch-none ${
                                       isSelected
                                         ? "border-2 border-primary shadow-sm"
                                         : "border border-transparent group-hover:border-primary/60"
@@ -1069,8 +1057,9 @@ export default function SignPDF() {
                                     <div className="absolute -top-4 left-1/2 -translate-x-1/2 flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
                                       <button
                                         type="button"
-                                        onMouseDown={(e) => {
+                                        onPointerDown={(e) => {
                                           e.stopPropagation();
+                                          e.preventDefault();
                                           removePlacement(f.id, placement.id);
                                         }}
                                         className="h-5 w-5 rounded bg-background text-foreground border border-border flex items-center justify-center text-[10px] shadow-sm"
@@ -1082,9 +1071,11 @@ export default function SignPDF() {
 
                                     {isSelected && (
                                       <div
-                                        onMouseDown={(e) => {
+                                        onPointerDown={(e) => {
+                                          e.preventDefault();
                                           e.stopPropagation();
                                           if (!stageRef.current) return;
+                                          (e.currentTarget as HTMLDivElement).setPointerCapture?.(e.pointerId);
                                           const rect = stageRef.current.getBoundingClientRect();
                                           const startX = e.clientX;
                                           const startY = e.clientY;
@@ -1094,7 +1085,7 @@ export default function SignPDF() {
                                           const keepAspect = variant?.mode === "type";
                                           const ratio = startW > 0 ? startH / startW : 1;
 
-                                          const onMove = (ev: MouseEvent) => {
+                                          const onMove = (ev: PointerEvent) => {
                                             const dw = (ev.clientX - startX) / rect.width;
                                             const dh = (ev.clientY - startY) / rect.height;
                                             const nextW = startW + dw;
@@ -1102,13 +1093,15 @@ export default function SignPDF() {
                                             updatePlacement(f.id, placement.id, { width: nextW, height: nextH });
                                           };
                                           const onUp = () => {
-                                            window.removeEventListener("mousemove", onMove);
-                                            window.removeEventListener("mouseup", onUp);
+                                            window.removeEventListener("pointermove", onMove);
+                                            window.removeEventListener("pointerup", onUp);
+                                            window.removeEventListener("pointercancel", onUp);
                                           };
-                                          window.addEventListener("mousemove", onMove);
-                                          window.addEventListener("mouseup", onUp);
+                                          window.addEventListener("pointermove", onMove);
+                                          window.addEventListener("pointerup", onUp);
+                                          window.addEventListener("pointercancel", onUp);
                                         }}
-                                        className="absolute right-0 bottom-0 h-3 w-3 bg-primary cursor-se-resize"
+                                        className="absolute right-0 bottom-0 h-4 w-4 bg-primary cursor-se-resize touch-none"
                                       />
                                     )}
                                   </div>
@@ -1427,12 +1420,12 @@ export default function SignPDF() {
                                 >
                                   <button
                                     type="button"
-                                    onMouseDown={(e) => {
+                                    onPointerDown={(e) => {
                                       e.preventDefault();
                                       e.stopPropagation();
                                       beginPaletteDrag(selectedField.id, v.id, e.clientX, e.clientY, "clone", null);
                                     }}
-                                    className="flex flex-col justify-center items-center pr-1 cursor-grab active:cursor-grabbing select-none"
+                                    className="flex flex-col justify-center items-center pr-1 cursor-grab active:cursor-grabbing select-none touch-none"
                                     aria-label="Drag to place signature"
                                   >
                                     <span className="flex gap-0.5 mb-[1px]">
@@ -1466,7 +1459,7 @@ export default function SignPDF() {
                                   <span className="text-xs font-medium">{selectedField.label}</span>
                                   <button
                                     type="button"
-                                    onMouseDown={(e) => {
+                                    onPointerDown={(e) => {
                                       e.preventDefault();
                                       e.stopPropagation();
                                       removeVariant(selectedField.id, v.id);

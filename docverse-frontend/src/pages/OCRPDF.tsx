@@ -4,6 +4,9 @@ import { Button } from "@/components/ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { ToolPageLayout } from "@/components/ToolPageLayout";
 import { FileUploadZone } from "@/components/FileUploadZone";
+import { ToolProcessingState } from "@/components/ToolProcessingState";
+import { ToolSuccessState } from "@/components/ToolSuccessState";
+import { xhrUploadForBlob, XhrUploadError } from "@/lib/xhrUpload";
 
 const languages = [
   { code: "en", name: "English" },
@@ -58,45 +61,20 @@ export default function OCRPDF() {
     formData.append("language", language);
 
     try {
-      await new Promise<void>((resolve, reject) => {
-        const xhr = new XMLHttpRequest();
-
-        xhr.open("POST", `${apiBase}/ocr-searchable-pdf`);
-        xhr.responseType = "blob";
-
-        const interval = window.setInterval(() => {
-          setProgress((prev) => {
-            if (prev >= 92) return prev;
-            const next = prev + 4;
-            return next > 92 ? 92 : next;
-          });
-        }, 100);
-
-        xhr.onload = () => {
-          window.clearInterval(interval);
-
-          if (xhr.status >= 200 && xhr.status < 300) {
-            const blob = xhr.response as Blob;
-            const url = URL.createObjectURL(blob);
-            setDownloadUrl(url);
-            setProgress(100);
-            setIsComplete(true);
-            resolve();
-          } else {
-            reject(new Error(`Request failed with status ${xhr.status}`));
-          }
-        };
-
-        xhr.onerror = () => {
-          window.clearInterval(interval);
-          reject(new Error("Network error while uploading files"));
-        };
-
-        xhr.send(formData);
+      const { blob } = await xhrUploadForBlob({
+        url: `${apiBase}/ocr-searchable-pdf`,
+        formData,
+        onProgress: (p) => setProgress(p),
       });
+
+      const url = URL.createObjectURL(blob);
+      setDownloadUrl(url);
+      setIsComplete(true);
     } catch (err) {
       console.error("Error generating searchable PDF", err);
-      if (!error) {
+      if (err instanceof XhrUploadError) {
+        setError(err.message);
+      } else {
         setError(
           "We couldn't generate the searchable PDF. This can happen with very large or complex documents. Try fewer pages or a clearer scan and try again."
         );
@@ -174,30 +152,28 @@ export default function OCRPDF() {
       <div className="mx-auto max-w-3xl">
         {!isComplete ? (
           isProcessing ? (
-            <div ref={loadingRef} className="py-16 flex flex-col items-center gap-6">
-              <h2 className="text-2xl font-semibold">Scanning...</h2>
-              <div className="relative h-24 w-24">
-                <div className="h-24 w-24 rounded-full border-[6px] border-secondary-foreground/10" />
-                <div className="absolute inset-0 rounded-full border-[6px] border-secondary border-t-transparent animate-spin" />
-                <div className="absolute inset-0 flex items-center justify-center text-sm font-semibold">
-                  {progress}%
-                </div>
-              </div>
-              {error && (
-                <p className="mt-2 text-sm text-destructive text-center max-w-md">{error}</p>
-              )}
-            </div>
+            <ToolProcessingState
+              containerRef={loadingRef}
+              title="Scanning..."
+              progress={progress}
+              error={error}
+              color="secondary"
+            />
           ) : (
             <>
               <div ref={uploadRef}>
-                {error && (
-                  <p className="mb-3 text-sm text-destructive text-center max-w-md mx-auto">{error}</p>
-                )}
                 <FileUploadZone
                   key={uploadKey}
                   accept=".pdf,.jpg,.jpeg,.png"
                   multiple
-                  maxFiles={10}
+                  maxFiles={5}
+                  externalError={error}
+                  maxTotalPages={50}
+                  maxImages={30}
+                  maxTotalPixels={200_000_000}
+                  totalPageLimitErrorMessage="OCR supports up to 50 total pages per request. Please split your PDF or upload fewer files and try again."
+                  imageLimitErrorMessage="OCR supports up to 30 images per request. Please upload fewer images and try again."
+                  pixelLimitErrorMessage="These images are too large (resolution). Please upload fewer or smaller images."
                   onFilesChange={setFiles}
                 />
               </div>
@@ -251,42 +227,26 @@ export default function OCRPDF() {
             </>
           )
         ) : (
-          <div ref={resultRef} className="py-8">
-            <div className="text-center mb-8">
-              <div className="mx-auto mb-4 flex h-16 w-16 items-center justify-center rounded-full bg-secondary/10">
-                <ScanText className="h-8 w-8 text-secondary" />
-              </div>
-              <h2 className="text-2xl font-bold mb-2">OCR Complete!</h2>
-              <p className="text-muted-foreground">
-                Your searchable PDF is ready to download.
-              </p>
-            </div>
-            <div className="flex flex-col items-center gap-4">
-              <Button
-                size="lg"
-                variant="outline"
-                onClick={() => {
-                  if (!downloadUrl) return;
-                  const link = document.createElement("a");
-                  link.href = downloadUrl;
-                  link.download = "ocr-searchable.pdf";
-                  document.body.appendChild(link);
-                  link.click();
-                  document.body.removeChild(link);
-                }}
-                disabled={!downloadUrl}
-              >
-                <Download className="h-5 w-5 mr-2" />
-                Download Searchable PDF
-              </Button>
-              <Button variant="ghost" onClick={handleReset}>
-                Scan another document
-              </Button>
-              {error && (
-                <p className="mt-1 text-sm text-destructive text-center max-w-md">{error}</p>
-              )}
-            </div>
-          </div>
+          <ToolSuccessState
+            containerRef={resultRef}
+            icon={ScanText}
+            iconColor="secondary"
+            title="OCR Complete!"
+            description="Your searchable PDF is ready to download."
+            downloadLabel="Download Searchable PDF"
+            disabledDownload={!downloadUrl}
+            onDownload={() => {
+              if (!downloadUrl) return;
+              const link = document.createElement("a");
+              link.href = downloadUrl;
+              link.download = "ocr-searchable.pdf";
+              document.body.appendChild(link);
+              link.click();
+              document.body.removeChild(link);
+            }}
+            secondaryLabel="Scan another document"
+            onSecondary={handleReset}
+          />
         )}
       </div>
     </ToolPageLayout>

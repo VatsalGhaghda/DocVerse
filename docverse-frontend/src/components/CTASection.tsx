@@ -27,8 +27,8 @@ export function CTASection() {
                 className="btn-hero bg-white text-primary hover:bg-white/90"
                 asChild
               >
-                <Link to="/signup">
-                  Get started free
+                <Link to="/merge">
+                  Get started
                   <ArrowRight className="h-5 w-5" />
                 </Link>
               </Button>
@@ -38,7 +38,7 @@ export function CTASection() {
                 className="btn-hero border-white/30 text-primary-foreground hover:bg-white/10"
                 asChild
               >
-                <Link to="/pricing">View pricing</Link>
+                <Link to="/about">Learn more</Link>
               </Button>
             </div>
           </div>

@@ -1,8 +1,9 @@
 import { useState } from "react";
 import { Link } from "react-router-dom";
-import { Menu, X, Sun, Moon, FileText, ChevronDown } from "lucide-react";
+import { Menu, X, Sun, Moon, ChevronDown } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useTheme } from "@/components/ThemeProvider";
+import { DocVerseLogo } from "@/components/DocVerseLogo";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -41,42 +42,38 @@ export function Navbar() {
         <div className="flex h-16 items-center justify-between">
           {/* Logo */}
           <Link to="/" className="flex items-center gap-2">
-            <div className="flex h-9 w-9 items-center justify-center rounded-lg gradient-primary">
-              <FileText className="h-5 w-5 text-primary-foreground" />
-            </div>
+            <DocVerseLogo size={26} zoom={2.6} className="h-[26] w-[26px] rounded-md" alt="DocVerse" />
             <span className="text-xl font-bold">DocVerse</span>
           </Link>
 
-          {/* Desktop Navigation */}
-          <div className="hidden items-center gap-1 md:flex">
-            <DropdownMenu>
-              <DropdownMenuTrigger asChild>
-                <Button variant="ghost" className="gap-1">
-                  Tools
-                  <ChevronDown className="h-4 w-4" />
-                </Button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="center" className="w-48">
-                {tools.map((tool) => (
-                  <DropdownMenuItem key={tool.name} asChild>
-                    <Link to={tool.href} className="flex items-center gap-2">
-                      <span>{tool.icon}</span>
-                      {tool.name}
-                    </Link>
-                  </DropdownMenuItem>
-                ))}
-              </DropdownMenuContent>
-            </DropdownMenu>
-            <Button variant="ghost" asChild>
-              <Link to="/pricing">Pricing</Link>
-            </Button>
-            <Button variant="ghost" asChild>
-              <Link to="/about">About</Link>
-            </Button>
-          </div>
-
           {/* Right side */}
           <div className="flex items-center gap-2">
+            {/* Desktop actions near theme toggle */}
+            <div className="hidden items-center gap-1 md:flex">
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <Button variant="ghost" className="gap-1">
+                    Tools
+                    <ChevronDown className="h-4 w-4" />
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end" className="w-56 max-h-[70vh] overflow-y-auto scroll-slim">
+                  {tools.map((tool) => (
+                    <DropdownMenuItem key={tool.name} asChild>
+                      <Link to={tool.href} className="flex items-center gap-2">
+                        <span>{tool.icon}</span>
+                        {tool.name}
+                      </Link>
+                    </DropdownMenuItem>
+                  ))}
+                </DropdownMenuContent>
+              </DropdownMenu>
+
+              <Button variant="ghost" asChild>
+                <Link to="/about">About</Link>
+              </Button>
+            </div>
+
             <Button
               variant="ghost"
               size="icon"
@@ -107,25 +104,20 @@ export function Navbar() {
           <div className="border-t border-border py-4 md:hidden animate-fade-in">
             <div className="flex flex-col gap-2">
               <p className="px-3 text-sm font-medium text-muted-foreground">Tools</p>
-              {tools.map((tool) => (
-                <Link
-                  key={tool.name}
-                  to={tool.href}
-                  className="flex items-center gap-2 rounded-lg px-3 py-2 text-sm hover:bg-muted"
-                  onClick={() => setIsOpen(false)}
-                >
-                  <span>{tool.icon}</span>
-                  {tool.name}
-                </Link>
-              ))}
+              <div className="max-h-[60vh] overflow-y-auto scroll-slim">
+                {tools.map((tool) => (
+                  <Link
+                    key={tool.name}
+                    to={tool.href}
+                    className="flex items-center gap-2 rounded-lg px-3 py-2 text-sm hover:bg-muted"
+                    onClick={() => setIsOpen(false)}
+                  >
+                    <span>{tool.icon}</span>
+                    {tool.name}
+                  </Link>
+                ))}
+              </div>
               <div className="my-2 border-t border-border" />
-              <Link
-                to="/pricing"
-                className="rounded-lg px-3 py-2 text-sm hover:bg-muted"
-                onClick={() => setIsOpen(false)}
-              >
-                Pricing
-              </Link>
               <Link
                 to="/about"
                 className="rounded-lg px-3 py-2 text-sm hover:bg-muted"

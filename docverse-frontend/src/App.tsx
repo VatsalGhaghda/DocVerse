@@ -9,16 +9,12 @@ import Index from "./pages/Index";
 import MergePDF from "./pages/MergePDF";
 import SplitPDF from "./pages/SplitPDF";
 import CompressPDF from "./pages/CompressPDF";
-import ConvertPDF from "./pages/ConvertPDF";
 import OCRPDF from "./pages/OCRPDF";
 import ProtectPDF from "./pages/ProtectPDF";
 import SignPDF from "./pages/SignPDF";
 import PDFToImage from "./pages/PDFToImage";
-import Pricing from "./pages/Pricing";
 import About from "./pages/About";
-import Dashboard from "./pages/Dashboard";
 import NotFound from "./pages/NotFound";
-import ConvertToPDF from "./pages/ConvertToPDF";
 import UnlockPDF from "./pages/UnlockPDF";
 import AddPageNumbers from "./pages/AddPageNumbers";
 import WatermarkPDF from "./pages/WatermarkPDF";
@@ -56,8 +52,6 @@ const App = () => (
             <Route path="/merge" element={<MergePDF />} />
             <Route path="/split" element={<SplitPDF />} />
             <Route path="/compress" element={<CompressPDF />} />
-            <Route path="/convert" element={<ConvertPDF />} />
-            <Route path="/to-pdf" element={<ConvertToPDF />} />
             <Route path="/pdf-to-word" element={<PDFToWord />} />
             <Route path="/pdf-to-excel" element={<PDFToExcel />} />
             <Route path="/pdf-to-powerpoint" element={<PDFToPowerPoint />} />
@@ -73,9 +67,7 @@ const App = () => (
             <Route path="/page-numbers" element={<AddPageNumbers />} />
             <Route path="/organize" element={<OrganizePDF />} />
             <Route path="/watermark" element={<WatermarkPDF />} />
-            <Route path="/pricing" element={<Pricing />} />
             <Route path="/about" element={<About />} />
-            <Route path="/dashboard" element={<Dashboard />} />
             <Route path="*" element={<NotFound />} />
           </Routes>
         </BrowserRouter>

@@ -7,6 +7,8 @@ import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { ToolPageLayout } from "@/components/ToolPageLayout";
 import { FileUploadZone } from "@/components/FileUploadZone";
 import { PdfPageThumbnail } from "@/components/PdfPageThumbnail";
+import { ToolProcessingState } from "@/components/ToolProcessingState";
+import { xhrUploadForBlob, XhrUploadError } from "@/lib/xhrUpload";
 
 export default function SplitPDF() {
   const [files, setFiles] = useState<any[]>([]);
@@ -101,6 +103,63 @@ export default function SplitPDF() {
 
     if (!allReady || !activeFile) return;
 
+    let resolvedPageCount = pageCount;
+    if (!resolvedPageCount) {
+      try {
+        const pdfjsLib = await import("pdfjs-dist");
+        // @ts-ignore - worker configured globally in PdfThumbnail/PdfPageThumbnail
+        const arrayBuffer = await activeFile.arrayBuffer();
+        const loadingTask = (pdfjsLib as any).getDocument({ data: arrayBuffer });
+        const pdf = await loadingTask.promise;
+        const count = Number(pdf?.numPages);
+        resolvedPageCount = Number.isFinite(count) ? count : null;
+        setPageCount(resolvedPageCount);
+      } catch {
+        resolvedPageCount = pageCount;
+      }
+    }
+
+    const MAX_OUTPUT_PDFS = 50;
+    const computeOutputCount = (): number | null => {
+      if (splitMode === "half") return 2;
+
+      // For 'each' mode, optionally only selected pages
+      if (splitMode === "each") {
+        if (pagesExtractMode === "select") {
+          return selectedPages.length;
+        }
+        return typeof resolvedPageCount === "number" ? resolvedPageCount : null;
+      }
+
+      // 'range' mode
+      if (rangeMode === "fixed") {
+        const total = typeof resolvedPageCount === "number" ? resolvedPageCount : null;
+        if (!total) return null;
+        const chunk = Math.max(1, parseInt(chunkSize || "1", 10) || 1);
+        return Math.ceil(total / chunk);
+      }
+
+      // custom ranges: count non-empty ranges
+      const normalizedRanges = ranges
+        .map((r) => {
+          const from = parseInt(r.from, 10);
+          const to = parseInt(r.to, 10);
+          if (Number.isNaN(from) && Number.isNaN(to)) return null;
+          return { from: Number.isNaN(from) ? 1 : from, to: Number.isNaN(to) ? from : to };
+        })
+        .filter(Boolean);
+
+      return normalizedRanges.length;
+    };
+
+    const outputCount = computeOutputCount();
+    if (typeof outputCount === "number" && outputCount > MAX_OUTPUT_PDFS) {
+      setError(
+        `This split would generate ${outputCount} PDF files. The limit is ${MAX_OUTPUT_PDFS}. Please increase the chunk size, reduce ranges, or select fewer pages.`
+      );
+      return;
+    }
+
     setIsProcessing(true);
     setIsComplete(false);
     setError(null);
@@ -163,46 +222,26 @@ export default function SplitPDF() {
     }
 
     try {
-      await new Promise<void>((resolve, reject) => {
-        const xhr = new XMLHttpRequest();
-
-        xhr.open("POST", `${apiBase}/split-pdf`);
-        xhr.responseType = "blob";
-
-        // Dummy loader: ease up from ~8% to low 90s while request is in flight
-        const interval = window.setInterval(() => {
-          setProgress((prev) => {
-            if (prev >= 92) return prev;
-            const next = prev + 4;
-            return next > 92 ? 92 : next;
-          });
-        }, 100);
-
-        xhr.onload = () => {
-          window.clearInterval(interval);
-
-          if (xhr.status >= 200 && xhr.status < 300) {
-            const blob = xhr.response as Blob;
-            const url = URL.createObjectURL(blob);
-            setDownloadUrl(url);
-            setProgress(100);
-            setIsComplete(true);
-            resolve();
-          } else {
-            reject(new Error(`Request failed with status ${xhr.status}`));
-          }
-        };
-
-        xhr.onerror = () => {
-          window.clearInterval(interval);
-          reject(new Error("Network error while uploading files"));
-        };
-
-        xhr.send(formData);
+      const { blob } = await xhrUploadForBlob({
+        url: `${apiBase}/split-pdf`,
+        formData,
+        onProgress: (p) => setProgress(p),
+        progressStart: 8,
+        progressCap: 92,
+        progressTickMs: 100,
+        progressTickAmount: 4,
       });
+
+      const url = URL.createObjectURL(blob);
+      setDownloadUrl(url);
+      setIsComplete(true);
     } catch (err) {
       console.error("Error splitting PDF", err);
-      setError("Something went wrong while splitting your PDF. Please try again.");
+      if (err instanceof XhrUploadError) {
+        setError(err.message);
+      } else {
+        setError("Something went wrong while splitting your PDF. Please try again.");
+      }
     } finally {
       setIsProcessing(false);
     }
@@ -357,19 +396,13 @@ export default function SplitPDF() {
       <div className="mx-auto max-w-5xl">
         {!isComplete ? (
           isProcessing ? (
-            <div ref={loadingRef} className="py-16 flex flex-col items-center gap-6">
-              <h2 className="text-2xl font-semibold">Splitting PDF...</h2>
-              <div className="relative h-24 w-24">
-                <div className="h-24 w-24 rounded-full border-[6px] border-secondary-foreground/10" />
-                <div className="absolute inset-0 rounded-full border-[6px] border-secondary border-t-transparent animate-spin" />
-                <div className="absolute inset-0 flex items-center justify-center text-sm font-semibold">
-                  {progress}%
-                </div>
-              </div>
-              {error && (
-                <p className="mt-2 text-sm text-destructive text-center max-w-md">{error}</p>
-              )}
-            </div>
+            <ToolProcessingState
+              containerRef={loadingRef}
+              title="Splitting PDF..."
+              progress={progress}
+              error={error}
+              color="secondary"
+            />
           ) : (
             <>
               <div ref={uploadRef}>
@@ -378,6 +411,7 @@ export default function SplitPDF() {
                   accept=".pdf"
                   multiple={false}
                   maxFiles={1}
+                  externalError={error}
                   onFilesChange={setFiles}
                 />
               </div>
@@ -656,21 +690,21 @@ export default function SplitPDF() {
                             {ranges.map((r, idx) => (
                               <div
                                 key={r.id}
-                                className="grid grid-cols-[auto,1fr,1fr,auto] items-center gap-2 text-sm"
+                                className="flex flex-col gap-2 text-sm sm:grid sm:grid-cols-[auto,1fr,1fr,auto] sm:items-center"
                               >
                                 <span className="text-xs text-muted-foreground whitespace-nowrap">
                                   Range {idx + 1}
                                 </span>
-                                <div className="flex items-center gap-2">
+                                <div className="flex items-center gap-2 w-full">
                                   <span className="text-xs text-muted-foreground">from</span>
-                                  <div className="inline-flex items-stretch rounded-full border bg-background overflow-hidden">
+                                  <div className="flex flex-1 sm:flex-none items-stretch rounded-full border bg-background overflow-hidden">
                                     <Input
                                       type="number"
                                       min={1}
                                       max={pageCount ?? undefined}
                                       value={r.from}
                                       onChange={(e) => updateRange(r.id, "from", e.target.value)}
-                                      className="h-8 w-20 border-0 focus-visible:ring-0 rounded-none text-right pr-2 no-native-spinner"
+                                      className="h-8 w-full sm:w-20 border-0 focus-visible:ring-0 rounded-none text-right pr-2 no-native-spinner"
                                     />
                                     <div className="flex flex-col border-l bg-muted/60">
                                       <button
@@ -696,16 +730,16 @@ export default function SplitPDF() {
                                     </div>
                                   </div>
                                 </div>
-                                <div className="flex items-center gap-2">
+                                <div className="flex items-center gap-2 w-full">
                                   <span className="text-xs text-muted-foreground">to</span>
-                                  <div className="inline-flex items-stretch rounded-full border bg-background overflow-hidden">
+                                  <div className="flex flex-1 sm:flex-none items-stretch rounded-full border bg-background overflow-hidden">
                                     <Input
                                       type="number"
                                       min={1}
                                       max={pageCount ?? undefined}
                                       value={r.to}
                                       onChange={(e) => updateRange(r.id, "to", e.target.value)}
-                                      className="h-8 w-20 border-0 focus-visible:ring-0 rounded-none text-right pr-2 no-native-spinner"
+                                      className="h-8 w-full sm:w-20 border-0 focus-visible:ring-0 rounded-none text-right pr-2 no-native-spinner"
                                     />
                                     <div className="flex flex-col border-l bg-muted/60">
                                       <button
@@ -733,7 +767,7 @@ export default function SplitPDF() {
                                 </div>
                                 <button
                                   type="button"
-                                  className="inline-flex h-8 w-8 items-center justify-center rounded-full border border-border text-muted-foreground hover:border-destructive/70 hover:text-destructive transition"
+                                  className="inline-flex h-8 w-8 items-center justify-center rounded-full border border-border text-muted-foreground hover:border-destructive/70 hover:text-destructive transition self-end sm:self-auto"
                                   onClick={() => removeRange(r.id)}
                                   disabled={ranges.length <= 1}
                                 >
@@ -741,7 +775,7 @@ export default function SplitPDF() {
                                 </button>
                               </div>
                             ))}
-                            <Button variant="outline" size="sm" onClick={addRange} className="mt-1">
+                            <Button variant="outline" size="sm" onClick={addRange} className="mt-1 w-full sm:w-auto">
                               + Add range
                             </Button>
                           </div>
@@ -849,24 +883,25 @@ export default function SplitPDF() {
                       </div>
                     )}
 
-                    <div className="flex flex-col items-center gap-4 pt-2">
+                    <div className="flex flex-col items-center gap-4 pt-2 w-full max-w-sm mx-auto px-2">
                       <Button
                         size="lg"
                         className="btn-hero gradient-secondary"
                         onClick={handleProcess}
                         disabled={isProcessing || !canSplit()}
+                        style={{ width: "100%" }}
                       >
                         Split PDF
                         <ArrowRight className="h-5 w-5" />
                       </Button>
-                      <Button variant="ghost" onClick={handleReset}>
+                      <Button variant="ghost" onClick={handleReset} className="w-full">
                         <RotateCcw className="h-4 w-4 mr-2" />
                         Start over
                       </Button>
                     </div>
 
                     {error && (
-                      <p className="mt-2 text-sm text-destructive text-center">{error}</p>
+                      <p className="mt-2 text-sm text-destructive text-center px-2">{error}</p>
                     )}
                   </div>
                 </div>
@@ -882,7 +917,7 @@ export default function SplitPDF() {
             <p className="text-muted-foreground mb-8">
               Your PDF has been split into multiple files.
             </p>
-            <div className="flex flex-col items-center gap-4">
+            <div className="flex flex-col items-center gap-4 w-full max-w-sm mx-auto px-2">
               <Button
                 size="lg"
                 className="btn-hero gradient-secondary"
@@ -896,11 +931,12 @@ export default function SplitPDF() {
                   document.body.removeChild(link);
                 }}
                 disabled={!downloadUrl}
+                style={{ width: "100%" }}
               >
                 <Download className="h-5 w-5 mr-2" />
                 Download All Files
               </Button>
-              <Button variant="outline" onClick={handleReset}>
+              <Button variant="outline" onClick={handleReset} className="w-full">
                 Split another PDF
               </Button>
             </div>

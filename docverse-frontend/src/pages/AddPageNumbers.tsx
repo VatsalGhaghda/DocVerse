@@ -8,6 +8,8 @@ import { Slider } from "@/components/ui/slider";
 import { ToolPageLayout } from "@/components/ToolPageLayout";
 import { FileUploadZone } from "@/components/FileUploadZone";
 import { PdfPageThumbnail } from "@/components/PdfPageThumbnail";
+import { ToolProcessingState } from "@/components/ToolProcessingState";
+import { xhrUploadForBlob, XhrUploadError } from "@/lib/xhrUpload";
 
 export default function AddPageNumbers() {
   const [files, setFiles] = useState<any[]>([]);
@@ -36,6 +38,7 @@ export default function AddPageNumbers() {
   const previewRef = useRef<HTMLDivElement | null>(null);
   const uploadRef = useRef<HTMLDivElement | null>(null);
   const loadingRef = useRef<HTMLDivElement | null>(null);
+  const completeRef = useRef<HTMLDivElement | null>(null);
 
   const activeFile = files[0]?.file as File | undefined;
   const [pageCount, setPageCount] = useState<number | null>(null);
@@ -77,45 +80,26 @@ export default function AddPageNumbers() {
     formData.append("underline", isUnderline ? "true" : "false");
 
     try {
-      await new Promise<void>((resolve, reject) => {
-        const xhr = new XMLHttpRequest();
-
-        xhr.open("POST", `${apiBase}/add-page-numbers`);
-        xhr.responseType = "blob";
-
-        const interval = window.setInterval(() => {
-          setProgress((prev) => {
-            if (prev >= 92) return prev;
-            const next = prev + 4;
-            return next > 92 ? 92 : next;
-          });
-        }, 100);
-
-        xhr.onload = () => {
-          window.clearInterval(interval);
-
-          if (xhr.status >= 200 && xhr.status < 300) {
-            const blob = xhr.response as Blob;
-            const url = URL.createObjectURL(blob);
-            setDownloadUrl(url);
-            setProgress(100);
-            setIsComplete(true);
-            resolve();
-          } else {
-            reject(new Error(`Request failed with status ${xhr.status}`));
-          }
-        };
-
-        xhr.onerror = () => {
-          window.clearInterval(interval);
-          reject(new Error("Network error while uploading file"));
-        };
-
-        xhr.send(formData);
+      const { blob } = await xhrUploadForBlob({
+        url: `${apiBase}/add-page-numbers`,
+        formData,
+        onProgress: (p) => setProgress(p),
+        progressStart: 8,
+        progressCap: 92,
+        progressTickMs: 100,
+        progressTickAmount: 4,
       });
+
+      const url = URL.createObjectURL(blob);
+      setDownloadUrl(url);
+      setIsComplete(true);
     } catch (err) {
       console.error("Error adding page numbers", err);
-      setError("Something went wrong while adding page numbers. Please try again.");
+      if (err instanceof XhrUploadError) {
+        setError(err.message);
+      } else {
+        setError("Something went wrong while adding page numbers. Please try again.");
+      }
     } finally {
       setIsProcessing(false);
     }
@@ -220,19 +204,13 @@ export default function AddPageNumbers() {
       <div className="mx-auto max-w-5xl">
         {!isComplete && (
           isProcessing ? (
-            <div ref={loadingRef} className="py-16 flex flex-col items-center gap-6">
-              <h2 className="text-2xl font-semibold">Applying numbers...</h2>
-              <div className="relative h-24 w-24">
-                <div className="h-24 w-24 rounded-full border-[6px] border-accent-foreground/10" />
-                <div className="absolute inset-0 rounded-full border-[6px] border-accent border-t-transparent animate-spin" />
-                <div className="absolute inset-0 flex items-center justify-center text-sm font-semibold">
-                  {progress}%
-                </div>
-              </div>
-              {error && (
-                <p className="mt-2 text-sm text-destructive text-center max-w-md">{error}</p>
-              )}
-            </div>
+            <ToolProcessingState
+              containerRef={loadingRef}
+              title="Applying numbers..."
+              progress={progress}
+              error={error}
+              color="accent"
+            />
           ) : (
             <>
               <div ref={uploadRef}>
@@ -576,7 +554,7 @@ export default function AddPageNumbers() {
                         <div className="space-y-2">
                           <Label>Page range (optional)</Label>
                           <div className="space-y-2 text-xs text-muted-foreground">
-                            <div className="grid grid-cols-[auto,auto,auto,auto] items-center gap-2">
+                            <div className="grid grid-cols-2 sm:grid-cols-[auto,auto,auto,auto] items-center gap-2">
                               <span className="whitespace-nowrap">From page</span>
                               <div className="inline-flex items-stretch rounded-full border bg-background overflow-hidden">
                                 <Input
@@ -928,17 +906,18 @@ export default function AddPageNumbers() {
                     </div>
 
                     {/* Sticky footer buttons */}
-                    <div className="border-t border-border bg-card/95 px-6 py-4 flex flex-col items-center gap-3 sticky bottom-0">
+                    <div className="flex flex-col items-center gap-4 pt-2 w-full max-w-sm mx-auto px-2">
                       <Button
                         size="lg"
-                        className="btn-hero w-full bg-accent text-accent-foreground hover:bg-accent/90"
+                        className="btn-hero bg-accent text-accent-foreground hover:bg-accent/90"
                         onClick={handleProcess}
                         disabled={isProcessing || !allReady}
+                        style={{ width: "100%" }}
                       >
-                        Apply page numbers
+                        Add Page Numbers
                         <ArrowRight className="h-5 w-5" />
                       </Button>
-                      <Button variant="ghost" onClick={handleReset} className="text-xs">
+                      <Button variant="ghost" onClick={handleReset} className="w-full">
                         <RotateCcw className="h-4 w-4 mr-2" />
                         Start over
                       </Button>
@@ -951,15 +930,15 @@ export default function AddPageNumbers() {
         )}
 
         {isComplete && (
-          <div className="text-center py-12">
+          <div ref={completeRef} className="text-center py-12">
             <div className="mx-auto mb-6 flex h-20 w-20 items-center justify-center rounded-full bg-accent/10">
               <ListOrdered className="h-10 w-10 text-accent" />
             </div>
-            <h2 className="text-2xl font-bold mb-2">Page Numbers Added!</h2>
+            <h2 className="text-2xl font-bold mb-2">Page numbers added!</h2>
             <p className="text-muted-foreground mb-8">
-              Your PDF now includes page numbers according to your settings.
+              Your PDF has been updated with page numbers.
             </p>
-            <div className="flex flex-col items-center gap-4">
+            <div className="flex flex-col items-center gap-4 w-full max-w-sm mx-auto px-2">
               <Button
                 size="lg"
                 className="btn-hero bg-accent text-accent-foreground hover:bg-accent/90"
@@ -968,17 +947,18 @@ export default function AddPageNumbers() {
                   const link = document.createElement("a");
                   link.href = downloadUrl;
                   const baseName = (files[0]?.name || "document").replace(/\.pdf$/i, "");
-                  link.download = `${baseName}-numbered.pdf`;
+                  link.download = `${baseName}-page-numbers.pdf`;
                   document.body.appendChild(link);
                   link.click();
                   document.body.removeChild(link);
                 }}
                 disabled={!downloadUrl}
+                style={{ width: "100%" }}
               >
                 <Download className="h-5 w-5 mr-2" />
-                Download Updated PDF
+                Download PDF
               </Button>
-              <Button variant="outline" onClick={handleReset}>
+              <Button variant="outline" onClick={handleReset} className="w-full">
                 Add numbers to another PDF
               </Button>
             </div>

@@ -4,6 +4,8 @@ import { Button } from "@/components/ui/button";
 import { ToolPageLayout } from "@/components/ToolPageLayout";
 import { FileUploadZone } from "@/components/FileUploadZone";
 import { PdfPageThumbnail } from "@/components/PdfPageThumbnail";
+import { ToolProcessingState } from "@/components/ToolProcessingState";
+import { xhrUploadForBlob, XhrUploadError } from "@/lib/xhrUpload";
 
 type OrganizedPage = {
   id: string;
@@ -88,45 +90,26 @@ export default function OrganizePDF() {
     formData.append("pages", JSON.stringify(payload));
 
     try {
-      await new Promise<void>((resolve, reject) => {
-        const xhr = new XMLHttpRequest();
-
-        xhr.open("POST", `${apiBase}/organize-pdf`);
-        xhr.responseType = "blob";
-
-        const interval = window.setInterval(() => {
-          setProgress((prev) => {
-            if (prev >= 92) return prev;
-            const next = prev + 4;
-            return next > 92 ? 92 : next;
-          });
-        }, 100);
-
-        xhr.onload = () => {
-          window.clearInterval(interval);
-
-          if (xhr.status >= 200 && xhr.status < 300) {
-            const blob = xhr.response as Blob;
-            const url = URL.createObjectURL(blob);
-            setDownloadUrl(url);
-            setProgress(100);
-            setIsComplete(true);
-            resolve();
-          } else {
-            reject(new Error(`Request failed with status ${xhr.status}`));
-          }
-        };
-
-        xhr.onerror = () => {
-          window.clearInterval(interval);
-          reject(new Error("Network error while uploading file"));
-        };
-
-        xhr.send(formData);
+      const { blob } = await xhrUploadForBlob({
+        url: `${apiBase}/organize-pdf`,
+        formData,
+        onProgress: (p) => setProgress(p),
+        progressStart: 8,
+        progressCap: 92,
+        progressTickMs: 100,
+        progressTickAmount: 4,
       });
+
+      const url = URL.createObjectURL(blob);
+      setDownloadUrl(url);
+      setIsComplete(true);
     } catch (err) {
       console.error("Error organizing PDF", err);
-      setError("Something went wrong while organizing your PDF. Please try again.");
+      if (err instanceof XhrUploadError) {
+        setError(err.message);
+      } else {
+        setError("Something went wrong while organizing your PDF. Please try again.");
+      }
     } finally {
       setIsProcessing(false);
     }
@@ -310,19 +293,13 @@ export default function OrganizePDF() {
       <div className="mx-auto max-w-5xl">
         {!isComplete ? (
           isProcessing ? (
-            <div ref={loadingRef} className="py-16 flex flex-col items-center gap-6">
-              <h2 className="text-2xl font-semibold">Organizing PDF...</h2>
-              <div className="relative h-24 w-24">
-                <div className="h-24 w-24 rounded-full border-[6px] border-primary-foreground/10" />
-                <div className="absolute inset-0 rounded-full border-[6px] border-primary border-t-transparent animate-spin" />
-                <div className="absolute inset-0 flex items-center justify-center text-sm font-semibold">
-                  {progress}%
-                </div>
-              </div>
-              {error && (
-                <p className="mt-2 text-sm text-destructive text-center max-w-md">{error}</p>
-              )}
-            </div>
+            <ToolProcessingState
+              containerRef={loadingRef}
+              title="Organizing PDF..."
+              progress={progress}
+              error={error}
+              color="primary"
+            />
           ) : (
             <>
               <div ref={uploadRef}>
@@ -363,17 +340,18 @@ export default function OrganizePDF() {
                     )}
                   </div>
 
-                  <div className="flex flex-col items-center gap-3">
+                  <div className="flex flex-col items-center gap-3 w-full max-w-sm mx-auto px-2">
                     <Button
                       size="lg"
                       className="btn-hero gradient-primary shadow-primary"
                       onClick={handleProcess}
                       disabled={isProcessing || !allReady || pages.length === 0}
+                      style={{ width: "100%" }}
                     >
                       Organize PDF
                       <ArrowRight className="h-5 w-5" />
                     </Button>
-                    <Button variant="ghost" onClick={handleReset}>
+                    <Button variant="ghost" onClick={handleReset} className="w-full">
                       <RotateCcw className="h-4 w-4 mr-2" />
                       Start over
                     </Button>
@@ -391,7 +369,7 @@ export default function OrganizePDF() {
             <p className="text-muted-foreground mb-8">
               Your PDF has been organized according to your page order and actions.
             </p>
-            <div className="flex flex-col items-center gap-4">
+            <div className="flex flex-col items-center gap-4 w-full max-w-sm mx-auto px-2">
               <Button
                 size="lg"
                 className="btn-hero gradient-primary shadow-primary"
@@ -406,11 +384,12 @@ export default function OrganizePDF() {
                   document.body.removeChild(link);
                 }}
                 disabled={!downloadUrl}
+                style={{ width: "100%" }}
               >
                 <Download className="h-5 w-5 mr-2" />
                 Download organized PDF
               </Button>
-              <Button variant="outline" onClick={handleReset}>
+              <Button variant="outline" onClick={handleReset} className="w-full">
                 Organize another PDF
               </Button>
             </div>

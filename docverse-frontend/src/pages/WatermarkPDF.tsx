@@ -19,6 +19,8 @@ import { Slider } from "@/components/ui/slider";
 import { ToolPageLayout } from "@/components/ToolPageLayout";
 import { FileUploadZone } from "@/components/FileUploadZone";
 import { PdfPageThumbnail } from "@/components/PdfPageThumbnail";
+import { ToolProcessingState } from "@/components/ToolProcessingState";
+import { xhrUploadForBlob, XhrUploadError } from "@/lib/xhrUpload";
 
 export default function WatermarkPDF() {
   const [files, setFiles] = useState<any[]>([]);
@@ -87,45 +89,26 @@ export default function WatermarkPDF() {
     formData.append("underline", isUnderline ? "true" : "false");
 
     try {
-      await new Promise<void>((resolve, reject) => {
-        const xhr = new XMLHttpRequest();
-
-        xhr.open("POST", `${apiBase}/watermark-pdf`);
-        xhr.responseType = "blob";
-
-        const interval = window.setInterval(() => {
-          setProgress((prev) => {
-            if (prev >= 92) return prev;
-            const next = prev + 4;
-            return next > 92 ? 92 : next;
-          });
-        }, 100);
-
-        xhr.onload = () => {
-          window.clearInterval(interval);
-
-          if (xhr.status >= 200 && xhr.status < 300) {
-            const blob = xhr.response as Blob;
-            const url = URL.createObjectURL(blob);
-            setDownloadUrl(url);
-            setProgress(100);
-            setIsComplete(true);
-            resolve();
-          } else {
-            reject(new Error(`Request failed with status ${xhr.status}`));
-          }
-        };
-
-        xhr.onerror = () => {
-          window.clearInterval(interval);
-          reject(new Error("Network error while uploading file"));
-        };
-
-        xhr.send(formData);
+      const { blob } = await xhrUploadForBlob({
+        url: `${apiBase}/watermark-pdf`,
+        formData,
+        onProgress: (p) => setProgress(p),
+        progressStart: 8,
+        progressCap: 92,
+        progressTickMs: 100,
+        progressTickAmount: 4,
       });
+
+      const url = URL.createObjectURL(blob);
+      setDownloadUrl(url);
+      setIsComplete(true);
     } catch (err) {
       console.error("Error watermarking PDF", err);
-      setError("Something went wrong while applying the watermark. Please try again.");
+      if (err instanceof XhrUploadError) {
+        setError(err.message);
+      } else {
+        setError("Something went wrong while applying the watermark. Please try again.");
+      }
     } finally {
       setIsProcessing(false);
     }
@@ -241,19 +224,13 @@ export default function WatermarkPDF() {
       <div className="mx-auto max-w-5xl">
         {!isComplete ? (
           isProcessing ? (
-            <div ref={loadingRef} className="py-16 flex flex-col items-center gap-6">
-              <h2 className="text-2xl font-semibold">Applying watermark...</h2>
-              <div className="relative h-24 w-24">
-                <div className="h-24 w-24 rounded-full border-[6px] border-secondary-foreground/10" />
-                <div className="absolute inset-0 rounded-full border-[6px] border-secondary border-t-transparent animate-spin" />
-                <div className="absolute inset-0 flex items-center justify-center text-sm font-semibold">
-                  {progress}%
-                </div>
-              </div>
-              {error && (
-                <p className="mt-2 text-sm text-destructive text-center max-w-md">{error}</p>
-              )}
-            </div>
+            <ToolProcessingState
+              containerRef={loadingRef}
+              title="Applying watermark..."
+              progress={progress}
+              error={error}
+              color="secondary"
+            />
           ) : (
             <>
               <div ref={uploadRef}>
@@ -391,7 +368,7 @@ export default function WatermarkPDF() {
                     <div className="space-y-2">
                       <Label>Pages</Label>
                       <div className="space-y-2 text-xs text-muted-foreground">
-                        <div className="grid grid-cols-[auto,auto,auto,auto] items-center gap-2">
+                        <div className="grid grid-cols-2 sm:grid-cols-[auto,auto,auto,auto] items-center gap-2">
                           <span className="whitespace-nowrap">From page</span>
                           <div className="inline-flex items-stretch rounded-full border bg-background overflow-hidden">
                             <Input

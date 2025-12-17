@@ -3,6 +3,8 @@ import { Presentation, ArrowRight, RotateCcw, Download } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { ToolPageLayout } from "@/components/ToolPageLayout";
 import { FileUploadZone } from "@/components/FileUploadZone";
+import { ToolProcessingState } from "@/components/ToolProcessingState";
+import { xhrUploadForBlob, XhrUploadError } from "@/lib/xhrUpload";
 
 export default function PDFToPowerPoint() {
   const [files, setFiles] = useState<any[]>([]);
@@ -38,50 +40,28 @@ export default function PDFToPowerPoint() {
     });
 
     try {
-      await new Promise<void>((resolve, reject) => {
-        const xhr = new XMLHttpRequest();
-
-        xhr.open("POST", `${apiBase}/convert/pdf-to-powerpoint`);
-        xhr.responseType = "blob";
-
-        const interval = window.setInterval(() => {
-          setProgress((prev) => {
-            if (prev >= 92) return prev;
-            const next = prev + 4;
-            return next > 92 ? 92 : next;
-          });
-        }, 100);
-
-        xhr.onload = () => {
-          window.clearInterval(interval);
-
-          if (xhr.status >= 200 && xhr.status < 300) {
-            const blob = xhr.response as Blob;
-            const url = URL.createObjectURL(blob);
-            const contentType = xhr.getResponseHeader("Content-Type") || "";
-            const kind: "single" | "zip" = contentType.toLowerCase().includes("zip")
-              ? "zip"
-              : "single";
-            setDownloadKind(kind);
-            setDownloadUrl(url);
-            setProgress(100);
-            setIsComplete(true);
-            resolve();
-          } else {
-            reject(new Error(`Request failed with status ${xhr.status}`));
-          }
-        };
-
-        xhr.onerror = () => {
-          window.clearInterval(interval);
-          reject(new Error("Network error while uploading file"));
-        };
-
-        xhr.send(formData);
+      const { blob, contentType } = await xhrUploadForBlob({
+        url: `${apiBase}/convert/pdf-to-powerpoint`,
+        formData,
+        onProgress: (p) => setProgress(p),
+        progressStart: 8,
+        progressCap: 92,
+        progressTickMs: 100,
+        progressTickAmount: 4,
       });
+
+      const url = URL.createObjectURL(blob);
+      const kind: "single" | "zip" = contentType.toLowerCase().includes("zip") ? "zip" : "single";
+      setDownloadKind(kind);
+      setDownloadUrl(url);
+      setIsComplete(true);
     } catch (err) {
       console.error("Error converting PDF to PowerPoint", err);
-      setError("Something went wrong while converting your PDF. Please try again.");
+      if (err instanceof XhrUploadError) {
+        setError(err.message);
+      } else {
+        setError("Something went wrong while converting your PDF. Please try again.");
+      }
     } finally {
       setIsProcessing(false);
     }
@@ -133,19 +113,13 @@ export default function PDFToPowerPoint() {
       <div className="mx-auto max-w-3xl">
         {!isComplete ? (
           isProcessing ? (
-            <div ref={loadingRef} className="py-16 flex flex-col items-center gap-6">
-              <h2 className="text-2xl font-semibold">Converting to PowerPoint...</h2>
-              <div className="relative h-24 w-24">
-                <div className="h-24 w-24 rounded-full border-[6px] border-accent-foreground/10" />
-                <div className="absolute inset-0 rounded-full border-[6px] border-accent border-t-transparent animate-spin" />
-                <div className="absolute inset-0 flex items-center justify-center text-sm font-semibold">
-                  {progress}%
-                </div>
-              </div>
-              {error && (
-                <p className="mt-2 text-sm text-destructive text-center max-w-md">{error}</p>
-              )}
-            </div>
+            <ToolProcessingState
+              containerRef={loadingRef}
+              title="Converting to PowerPoint..."
+              progress={progress}
+              error={error}
+              color="accent"
+            />
           ) : (
             <>
               <div ref={uploadRef}>
@@ -153,7 +127,9 @@ export default function PDFToPowerPoint() {
                   key={uploadKey}
                   accept=".pdf"
                   multiple
-                  maxFiles={5}
+                  maxFiles={10}
+                  maxTotalPages={50}
+                  totalPageLimitErrorMessage="PDF to PowerPoint supports up to 50 pages total per conversion request."
                   variant="accent"
                   iconType="powerpoint"
                   horizontalScroll={false}

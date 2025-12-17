@@ -3,6 +3,8 @@ import { FileStack, ArrowRight, RotateCcw, Download } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { ToolPageLayout } from "@/components/ToolPageLayout";
 import { FileUploadZone } from "@/components/FileUploadZone";
+import { ToolProcessingState } from "@/components/ToolProcessingState";
+import { xhrUploadForBlob, XhrUploadError } from "@/lib/xhrUpload";
 
 export default function MergePDF() {
   const [files, setFiles] = useState<any[]>([]);
@@ -33,50 +35,26 @@ export default function MergePDF() {
         }
       });
 
-      await new Promise<void>((resolve, reject) => {
-        const xhr = new XMLHttpRequest();
-
-        xhr.open("POST", `${apiBase}/merge-pdf`);
-
-        // Dummy loader: smoothly increase progress up to ~92% while request is in flight
-        // tuned to reach the low 90s in ~2–2.5s under normal conditions
-        const interval = window.setInterval(() => {
-          setProgress((prev) => {
-            if (prev >= 92) {
-              return prev;
-            }
-            const next = prev + 5;
-            return next > 92 ? 92 : next;
-          });
-        }, 120);
-
-        xhr.responseType = "blob";
-
-        xhr.onload = () => {
-          window.clearInterval(interval);
-
-          if (xhr.status >= 200 && xhr.status < 300) {
-            const blob = xhr.response as Blob;
-            const url = URL.createObjectURL(blob);
-            setDownloadUrl(url);
-            setProgress(100);
-            setIsComplete(true);
-            resolve();
-          } else {
-            reject(new Error(`Request failed with status ${xhr.status}`));
-          }
-        };
-
-        xhr.onerror = () => {
-          window.clearInterval(interval);
-          reject(new Error("Network error while uploading files"));
-        };
-
-        xhr.send(formData);
+      const { blob } = await xhrUploadForBlob({
+        url: `${apiBase}/merge-pdf`,
+        formData,
+        onProgress: (p) => setProgress(p),
+        progressStart: 0,
+        progressCap: 92,
+        progressTickMs: 120,
+        progressTickAmount: 5,
       });
+
+      const url = URL.createObjectURL(blob);
+      setDownloadUrl(url);
+      setIsComplete(true);
     } catch (err: any) {
       console.error("Error merging PDFs", err);
-      setError("Something went wrong while starting the merge. Please try again.");
+      if (err instanceof XhrUploadError) {
+        setError(err.message);
+      } else {
+        setError("Something went wrong while starting the merge. Please try again.");
+      }
     } finally {
       setIsProcessing(false);
     }
@@ -136,20 +114,13 @@ export default function MergePDF() {
       <div className="mx-auto max-w-3xl">
         {!isComplete ? (
           isProcessing ? (
-            // Full-width merging screen (similar to iLovePDF style)
-            <div ref={loadingRef} className="py-16 flex flex-col items-center gap-6">
-              <h2 className="text-2xl font-semibold">Merging PDFs...</h2>
-              <div className="relative h-24 w-24">
-                <div className="h-24 w-24 rounded-full border-[6px] border-primary-foreground/10" />
-                <div className="absolute inset-0 rounded-full border-[6px] border-primary border-t-transparent animate-spin" />
-                <div className="absolute inset-0 flex items-center justify-center text-sm font-semibold">
-                  {progress}%
-                </div>
-              </div>
-              {error && (
-                <p className="mt-2 text-sm text-destructive text-center max-w-md">{error}</p>
-              )}
-            </div>
+            <ToolProcessingState
+              containerRef={loadingRef}
+              title="Merging PDFs..."
+              progress={progress}
+              error={error}
+              color="primary"
+            />
           ) : (
             <>
               <div ref={uploadRef}>
@@ -157,7 +128,7 @@ export default function MergePDF() {
                   key={uploadKey}
                   accept=".pdf"
                   multiple
-                  maxFiles={5}
+                  maxFiles={10}
                   horizontalScroll={false}
                   onFilesChange={setFiles}
                 />

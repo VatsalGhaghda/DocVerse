@@ -4,6 +4,7 @@ import { PdfThumbnail } from "@/components/PdfThumbnail";
 import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
 import { cn } from "@/lib/utils";
+import { useToolTheme } from "@/components/ToolPageLayout";
 
 interface UploadedFile {
   id: string;
@@ -12,6 +13,9 @@ interface UploadedFile {
   progress: number;
   status: "uploading" | "complete" | "error";
   file?: File;
+  kind?: "pdf" | "image" | "other";
+  pdfPages?: number;
+  pixelCount?: number;
 }
 
 interface FileUploadZoneProps {
@@ -21,6 +25,19 @@ interface FileUploadZoneProps {
   onFilesChange?: (files: UploadedFile[]) => void;
   className?: string;
   showThumbnails?: boolean;
+  allowEncryptedPdf?: boolean;
+  externalError?: string | null;
+  pdfEncryptionMode?: "allow" | "require_encrypted" | "reject_encrypted";
+  encryptedPdfErrorMessage?: string;
+  unencryptedPdfErrorMessage?: string;
+  maxPdfPages?: number;
+  maxTotalPages?: number;
+  maxImages?: number;
+  maxTotalPixels?: number;
+  pdfPageLimitErrorMessage?: string;
+  totalPageLimitErrorMessage?: string;
+  imageLimitErrorMessage?: string;
+  pixelLimitErrorMessage?: string;
   // Controls which icon/colour to show for non-PDF thumbnails and the upload chip
   variant?: "primary" | "secondary" | "accent";
   iconType?: "generic" | "word" | "excel" | "powerpoint";
@@ -36,23 +53,61 @@ export function FileUploadZone({
   onFilesChange,
   className,
   showThumbnails = true,
-  variant = "primary",
+  allowEncryptedPdf = false,
+  externalError,
+  pdfEncryptionMode,
+  encryptedPdfErrorMessage,
+  unencryptedPdfErrorMessage,
+  maxPdfPages,
+  maxTotalPages,
+  maxImages,
+  maxTotalPixels,
+  pdfPageLimitErrorMessage,
+  totalPageLimitErrorMessage,
+  imageLimitErrorMessage,
+  pixelLimitErrorMessage,
+  variant,
   iconType = "generic",
   horizontalScroll = true,
 }: FileUploadZoneProps) {
+  const toolTheme = useToolTheme();
+  const resolvedVariant = variant ?? toolTheme?.iconColor ?? "primary";
   const [files, setFiles] = useState<UploadedFile[]>([]);
   const [isDragging, setIsDragging] = useState(false);
   const [draggingId, setDraggingId] = useState<string | null>(null);
+  const [uploadError, setUploadError] = useState<string | null>(null);
+
+  const resolvedPdfEncryptionMode =
+    pdfEncryptionMode ?? (allowEncryptedPdf ? "allow" : "reject_encrypted");
+
+  const uploadZoneVariantClasses = (() => {
+    if (resolvedVariant === "secondary") {
+      return {
+        hover: "hover:border-secondary/50",
+        active: "border-secondary bg-secondary/5",
+      } as const;
+    }
+    if (resolvedVariant === "accent") {
+      return {
+        hover: "hover:border-accent/50",
+        active: "border-accent bg-accent/5",
+      } as const;
+    }
+    return {
+      hover: "hover:border-primary/50",
+      active: "border-primary bg-primary/5",
+    } as const;
+  })();
 
   const colorClasses = (() => {
-    if (variant === "secondary") {
+    if (resolvedVariant === "secondary") {
       return {
         bg: "bg-secondary/10",
         icon: "text-secondary",
         ready: "text-secondary",
       } as const;
     }
-    if (variant === "accent") {
+    if (resolvedVariant === "accent") {
       return {
         bg: "bg-accent/10",
         icon: "text-accent",
@@ -100,44 +155,279 @@ export function FileUploadZone({
     setIsDragging(false);
   }, []);
 
-  const processFiles = useCallback((fileList: FileList) => {
-    const newFiles: UploadedFile[] = Array.from(fileList)
-      .slice(0, maxFiles - files.length)
-      .map((file) => ({
-        id: Math.random().toString(36).substr(2, 9),
-        name: file.name,
-        size: file.size,
-        progress: 0,
-        status: "uploading" as const,
-        file,
-      }));
+  const acceptTokens = accept
+    .split(",")
+    .map((t) => t.trim().toLowerCase())
+    .filter(Boolean);
 
-    // Simulate upload progress
-    newFiles.forEach((file, index) => {
-      setTimeout(() => {
-        const interval = setInterval(() => {
-          setFiles((prev) => {
-            const updated: UploadedFile[] = prev.map((f) => {
-              if (f.id === file.id && f.progress < 100) {
-                const newProgress = Math.min(f.progress + Math.random() * 30, 100);
-                return {
-                  ...f,
-                  progress: newProgress,
-                  status: (newProgress === 100 ? "complete" : "uploading") as UploadedFile["status"],
-                };
-              }
-              return f;
-            });
-            return updated;
-          });
-        }, 200);
+  const matchesAccept = (file: File): boolean => {
+    if (acceptTokens.length === 0) return true;
 
-        setTimeout(() => clearInterval(interval), 2000);
-      }, index * 300);
+    const name = file.name.toLowerCase();
+    const type = file.type.toLowerCase();
+
+    return acceptTokens.some((token) => {
+      if (token === "*/*") return true;
+      if (token.endsWith("/*")) {
+        const prefix = token.slice(0, -1);
+        return type.startsWith(prefix);
+      }
+      if (token.startsWith(".")) return name.endsWith(token);
+      return type === token;
     });
+  };
 
-    setFiles((prev) => [...prev, ...newFiles]);
-  }, [files.length, maxFiles, onFilesChange]);
+  const acceptLabel = (() => {
+    const exts = acceptTokens.filter((t) => t.startsWith("."));
+    if (exts.length > 0) return exts.join(", ").toUpperCase();
+    const mimes = acceptTokens.filter((t) => !t.startsWith("."));
+    if (mimes.length > 0) return mimes.join(", ");
+    return "selected formats";
+  })();
+
+  const isPdfFile = (file: File): boolean => {
+    const name = file.name.toLowerCase();
+    return file.type === "application/pdf" || name.endsWith(".pdf");
+  };
+
+  const isImageFile = (file: File): boolean => {
+    const name = file.name.toLowerCase();
+    return file.type.startsWith("image/") || name.endsWith(".jpg") || name.endsWith(".jpeg") || name.endsWith(".png");
+  };
+
+  const getPdfPageCount = async (file: File): Promise<number | null> => {
+    try {
+      const pdfjsLib = await import("pdfjs-dist");
+      // @ts-ignore - worker configured globally in PdfThumbnail/PdfPageThumbnail
+      const arrayBuffer = await file.arrayBuffer();
+      const loadingTask = (pdfjsLib as any).getDocument({ data: arrayBuffer });
+      const pdf = await loadingTask.promise;
+      const count = Number(pdf?.numPages);
+      return Number.isFinite(count) ? count : null;
+    } catch {
+      return null;
+    }
+  };
+
+  const getImagePixelCount = async (file: File): Promise<number | null> => {
+    try {
+      if (typeof createImageBitmap === "function") {
+        const bmp = await createImageBitmap(file);
+        const pixels = bmp.width * bmp.height;
+        bmp.close?.();
+        return Number.isFinite(pixels) ? pixels : null;
+      }
+    } catch {
+      // ignore and fallback
+    }
+
+    try {
+      const url = URL.createObjectURL(file);
+      const img = new Image();
+      const pixels = await new Promise<number>((resolve, reject) => {
+        img.onload = () => resolve(img.width * img.height);
+        img.onerror = () => reject(new Error("image-load-failed"));
+        img.src = url;
+      });
+      URL.revokeObjectURL(url);
+      return Number.isFinite(pixels) ? pixels : null;
+    } catch {
+      return null;
+    }
+  };
+
+  const isEncryptedPdf = async (file: File): Promise<boolean> => {
+    try {
+      const pdfjsLib = await import("pdfjs-dist");
+      // @ts-ignore - worker configured globally in PdfThumbnail/PdfPageThumbnail
+      const arrayBuffer = await file.arrayBuffer();
+      const loadingTask = (pdfjsLib as any).getDocument({ data: arrayBuffer });
+      await loadingTask.promise;
+      return false;
+    } catch (err: any) {
+      const name = String(err?.name || "");
+      const message = String(err?.message || "");
+      return (
+        name.toLowerCase().includes("password") ||
+        message.toLowerCase().includes("password")
+      );
+    }
+  };
+
+  const processFiles = useCallback(
+    async (fileList: FileList) => {
+      setUploadError(null);
+
+      const remainingSlots = Math.max(0, maxFiles - files.length);
+      if (remainingSlots === 0) {
+        setUploadError(`You can upload up to ${maxFiles} file(s).`);
+        return;
+      }
+
+      const candidates = Array.from(fileList).slice(0, remainingSlots);
+
+      const existingPdfPages = files.reduce((sum, f) => sum + (f.pdfPages || 0), 0);
+      const existingImageCount = files.reduce((sum, f) => sum + (f.kind === "image" ? 1 : 0), 0);
+      const existingTotalPages = files.reduce(
+        (sum, f) => sum + (typeof f.pdfPages === "number" ? f.pdfPages : f.kind === "image" ? 1 : 0),
+        0
+      );
+      const existingTotalPixels = files.reduce((sum, f) => sum + (f.pixelCount || 0), 0);
+
+      let runningPdfPages = existingPdfPages;
+      let runningImageCount = existingImageCount;
+      let runningTotalPages = existingTotalPages;
+      let runningTotalPixels = existingTotalPixels;
+
+      for (const candidate of candidates) {
+        if (!matchesAccept(candidate)) {
+          setUploadError(`Unsupported file format. Please upload ${acceptLabel}.`);
+          continue;
+        }
+
+        const candidateIsPdf = isPdfFile(candidate);
+        const candidateIsImage = isImageFile(candidate);
+
+        let pdfPages: number | null = null;
+        let pixelCount: number | null = null;
+
+        if (candidateIsPdf && (typeof maxPdfPages === "number" || typeof maxTotalPages === "number")) {
+          pdfPages = await getPdfPageCount(candidate);
+          if (typeof maxPdfPages === "number" && typeof pdfPages === "number" && pdfPages > maxPdfPages) {
+            setUploadError(
+              pdfPageLimitErrorMessage ||
+                `This PDF has ${pdfPages} pages. The limit for this tool is ${maxPdfPages} pages.`
+            );
+            continue;
+          }
+        }
+
+        if (candidateIsImage && typeof maxTotalPixels === "number") {
+          pixelCount = await getImagePixelCount(candidate);
+        }
+
+        if (candidateIsImage && typeof maxImages === "number" && runningImageCount + 1 > maxImages) {
+          setUploadError(
+            imageLimitErrorMessage || `You can upload up to ${maxImages} image(s) for this tool.`
+          );
+          continue;
+        }
+
+        const candidatePagesForTotal =
+          typeof pdfPages === "number" ? pdfPages : candidateIsImage ? 1 : 0;
+
+        if (
+          typeof maxTotalPages === "number" &&
+          runningTotalPages + candidatePagesForTotal > maxTotalPages
+        ) {
+          setUploadError(
+            totalPageLimitErrorMessage ||
+              `This upload is too large. The limit for this tool is ${maxTotalPages} total page(s).`
+          );
+          continue;
+        }
+
+        if (
+          typeof maxTotalPixels === "number" &&
+          typeof pixelCount === "number" &&
+          runningTotalPixels + pixelCount > maxTotalPixels
+        ) {
+          setUploadError(
+            pixelLimitErrorMessage ||
+              "These images are too large (resolution). Please upload fewer or smaller images."
+          );
+          continue;
+        }
+
+        if (isPdfFile(candidate) && resolvedPdfEncryptionMode !== "allow") {
+          const encrypted = await isEncryptedPdf(candidate);
+
+          if (resolvedPdfEncryptionMode === "reject_encrypted" && encrypted) {
+            setUploadError(
+              encryptedPdfErrorMessage ||
+                "Protected PDFs aren't supported for this tool. Please unlock the PDF first using Unlock PDF."
+            );
+            continue;
+          }
+
+          if (resolvedPdfEncryptionMode === "require_encrypted" && !encrypted) {
+            setUploadError(
+              unencryptedPdfErrorMessage ||
+                "This tool only works with protected PDFs. Please upload a password-protected PDF."
+            );
+            continue;
+          }
+        }
+
+        const uploaded: UploadedFile = {
+          id: Math.random().toString(36).substr(2, 9),
+          name: candidate.name,
+          size: candidate.size,
+          progress: 0,
+          status: "uploading" as const,
+          file: candidate,
+          kind: candidateIsPdf ? "pdf" : candidateIsImage ? "image" : "other",
+          pdfPages: typeof pdfPages === "number" ? pdfPages : undefined,
+          pixelCount: typeof pixelCount === "number" ? pixelCount : undefined,
+        };
+
+        if (candidateIsPdf && typeof pdfPages === "number") {
+          runningPdfPages += pdfPages;
+        }
+        if (candidateIsImage) {
+          runningImageCount += 1;
+          runningTotalPages += 1;
+        } else if (candidateIsPdf && typeof pdfPages === "number") {
+          runningTotalPages += pdfPages;
+        }
+        if (typeof pixelCount === "number") {
+          runningTotalPixels += pixelCount;
+        }
+
+        // Simulate upload progress
+        setTimeout(() => {
+          const interval = setInterval(() => {
+            setFiles((prev) => {
+              const updated: UploadedFile[] = prev.map((f) => {
+                if (f.id === uploaded.id && f.progress < 100) {
+                  const newProgress = Math.min(f.progress + Math.random() * 30, 100);
+                  return {
+                    ...f,
+                    progress: newProgress,
+                    status: (newProgress === 100 ? "complete" : "uploading") as UploadedFile["status"],
+                  };
+                }
+                return f;
+              });
+              return updated;
+            });
+          }, 200);
+
+          setTimeout(() => clearInterval(interval), 2000);
+        }, 0);
+
+        setFiles((prev) => [...prev, uploaded]);
+      }
+    },
+    [
+      acceptLabel,
+      allowEncryptedPdf,
+      files,
+      matchesAccept,
+      maxFiles,
+      maxImages,
+      maxPdfPages,
+      maxTotalPages,
+      maxTotalPixels,
+      pdfPageLimitErrorMessage,
+      totalPageLimitErrorMessage,
+      imageLimitErrorMessage,
+      pixelLimitErrorMessage,
+      resolvedPdfEncryptionMode,
+      encryptedPdfErrorMessage,
+      unencryptedPdfErrorMessage,
+    ]
+  );
 
   const handleDrop = useCallback(
     (e: React.DragEvent) => {
@@ -146,7 +436,7 @@ export function FileUploadZone({
       setIsDragging(false);
 
       if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
-        processFiles(e.dataTransfer.files);
+        void processFiles(e.dataTransfer.files);
       }
     },
     [processFiles]
@@ -188,7 +478,7 @@ export function FileUploadZone({
   const handleFileInput = useCallback(
     (e: React.ChangeEvent<HTMLInputElement>) => {
       if (e.target.files && e.target.files.length > 0) {
-        processFiles(e.target.files);
+        void processFiles(e.target.files);
       }
     },
     [processFiles]
@@ -207,12 +497,14 @@ export function FileUploadZone({
   };
 
   return (
-    <div className={cn("w-full", className)}>
+    <div className={cn("mx-auto w-full max-w-3xl", className)}>
       {/* Upload Zone */}
       <div
         className={cn(
-          "upload-zone cursor-pointer",
-          isDragging && "upload-zone-active"
+          "upload-zone cursor-pointer min-h-[260px] sm:min-h-[320px]",
+          uploadZoneVariantClasses.hover,
+          isDragging && "upload-zone-active",
+          isDragging && uploadZoneVariantClasses.active
         )}
         onDragEnter={handleDragIn}
         onDragLeave={handleDragOut}
@@ -267,6 +559,12 @@ export function FileUploadZone({
             return "Supports: selected files up to 100MB each";
           })()}
         </p>
+
+        {externalError || uploadError ? (
+          <p className="mt-3 text-sm text-destructive text-center max-w-md px-2">
+            {externalError || uploadError}
+          </p>
+        ) : null}
       </div>
 
       {files.length > 0 && (
@@ -294,7 +592,9 @@ export function FileUploadZone({
             <div
               className={cn(
                 "flex gap-4",
-                horizontalScroll ? "min-w-full" : "flex-wrap"
+                horizontalScroll
+                  ? "min-w-full justify-center sm:justify-start"
+                  : "flex-wrap justify-center sm:justify-start"
               )}
             >
               {files.map((file) => (

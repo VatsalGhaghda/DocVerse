@@ -19,7 +19,7 @@ export function HeroSection() {
           {/* Badge */}
           <div className="mb-6 inline-flex items-center gap-2 rounded-full border border-border bg-background/50 px-4 py-2 text-sm backdrop-blur-sm animate-fade-in">
             <Sparkles className="h-4 w-4 text-accent" />
-            <span>Trusted by over 1 million users worldwide</span>
+            <span>A practical PDF toolbox for everyday work</span>
           </div>
 
           {/* Headline */}
@@ -47,16 +47,10 @@ export function HeroSection() {
             </Button>
           </div>
 
-          {/* Trust indicators */}
           <div className="mt-16 animate-fade-in-up" style={{ animationDelay: "0.4s" }}>
-            <p className="mb-4 text-sm text-muted-foreground">Trusted by teams at</p>
-            <div className="flex flex-wrap items-center justify-center gap-8 opacity-60 grayscale">
-              {["Google", "Microsoft", "Adobe", "Stripe", "Notion"].map((company) => (
-                <span key={company} className="text-lg font-semibold">
-                  {company}
-                </span>
-              ))}
-            </div>
+            <p className="text-sm text-muted-foreground">
+              No accounts, no pricing plans—just focused PDF tools you can use right away.
+            </p>
           </div>
         </div>
       </div>

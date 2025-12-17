@@ -12,507 +12,75 @@ import path from "path";
 import { execFile } from "child_process";
 import { promisify } from "util";
 import {
-  ServicePrincipalCredentials,
-  PDFServices,
-  MimeType,
-  CreatePDFJob,
-  CreatePDFResult,
-  ExportPDFJob,
-  ExportPDFParams,
-  ExportPDFTargetFormat,
-  ExportPDFResult,
-  CompressPDFJob,
-  CompressPDFResult,
-  OCRJob,
-  OCRResult,
-  OCRParams,
-  OCRSupportedLocale,
-  OCRSupportedType,
-} from "@adobe/pdfservices-node-sdk";
+  ConversionResult,
+  OfficeFormat,
+  PdfToOfficeFormat,
+  PdfToOfficeResult,
+} from "./services/types";
+import { isAdobeEnabled, ocrWithAdobe } from "./services/adobe";
+import { convertOfficeToPdf } from "./services/officeToPdf";
+import { convertPdfToOffice } from "./services/pdfToOffice";
+import { compressPdfFile } from "./services/compress";
+import { ocrSearchablePdfWithTesseract } from "./services/ocr";
 
 
 const app = express();
 const PORT = process.env.PORT || 4000;
 const execFileAsync = promisify(execFile);
 
-type OfficeFormat = "word" | "excel" | "powerpoint";
+const RATE_LIMIT_ENABLED = process.env.RATE_LIMIT_ENABLED !== "false";
+const RATE_LIMIT_WINDOW_MS = Number(process.env.RATE_LIMIT_WINDOW_MS || 60_000);
+const RATE_LIMIT_MAX = Number(process.env.RATE_LIMIT_MAX || 60);
 
-type PdfToOfficeFormat = "word" | "excel" | "powerpoint";
+type RateLimitEntry = { count: number; windowStart: number };
+const rateLimitStore = new Map<string, RateLimitEntry>();
 
-interface ConversionResult {
-  pdfBytes: Buffer;
-  outputFilename: string;
-  engine: "adobe" | "libreoffice";
-}
+const getClientKey = (req: Request): string => {
+  const ip =
+    (typeof req.headers["x-forwarded-for"] === "string"
+      ? req.headers["x-forwarded-for"].split(",")[0].trim()
+      : Array.isArray(req.headers["x-forwarded-for"])
+        ? req.headers["x-forwarded-for"][0]
+        : undefined) ||
+    req.ip ||
+    (req.connection as any)?.remoteAddress ||
+    "unknown";
 
-interface PdfToOfficeResult {
-  outputBytes: Buffer;
-  outputFilename: string;
-  engine: "adobe" | "libreoffice";
-  contentType: string;
-}
-
-const isAdobeEnabled = (): boolean => {
-  return (
-    process.env.ADOBE_PDF_SERVICES_ENABLED === "true" &&
-    !!process.env.ADOBE_CLIENT_ID &&
-    !!process.env.ADOBE_CLIENT_SECRET
-  );
+  return ip;
 };
 
-const getPdfToOfficeMime = (format: PdfToOfficeFormat): string => {
-  if (format === "word") {
-    return "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+const rateLimitMiddleware = (req: Request, res: Response, next: () => void) => {
+  if (!RATE_LIMIT_ENABLED) return next();
+
+  if (req.method === "OPTIONS") return next();
+  if (req.path === "/health" || req.path === "/version") return next();
+
+  const now = Date.now();
+  const key = getClientKey(req);
+  const existing = rateLimitStore.get(key);
+
+  if (!existing || now - existing.windowStart >= RATE_LIMIT_WINDOW_MS) {
+    rateLimitStore.set(key, { count: 1, windowStart: now });
+    return next();
   }
-  if (format === "excel") {
-    return "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
-  }
-  return "application/vnd.openxmlformats-officedocument.presentationml.presentation";
-};
 
-const getPdfToOfficeExtension = (format: PdfToOfficeFormat): string => {
-  if (format === "word") return "docx";
-  if (format === "excel") return "xlsx";
-  return "pptx";
-};
+  existing.count += 1;
+  rateLimitStore.set(key, existing);
 
-const getPdfToOfficeTargetFormat = (format: PdfToOfficeFormat): any => {
-  if (format === "word") return (ExportPDFTargetFormat as any).DOCX;
-  if (format === "excel") return (ExportPDFTargetFormat as any).XLSX;
-  return (ExportPDFTargetFormat as any).PPTX;
-};
+  if (existing.count > RATE_LIMIT_MAX) {
+    const retryAfterSeconds = Math.max(
+      1,
+      Math.ceil((existing.windowStart + RATE_LIMIT_WINDOW_MS - now) / 1000)
+    );
 
-const streamToBuffer = async (readStream: NodeJS.ReadableStream): Promise<Buffer> => {
-  const chunks: Buffer[] = [];
-  return new Promise<Buffer>((resolve, reject) => {
-    readStream.on("data", (chunk) => {
-      chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    res.setHeader("Retry-After", String(retryAfterSeconds));
+    return res.status(429).json({
+      status: "error",
+      message: "Too many requests. Please slow down and try again.",
     });
-    readStream.on("end", () => resolve(Buffer.concat(chunks)));
-    readStream.on("error", reject);
-  });
-};
-
-const ocrWithAdobe = async (pdfBytes: Buffer, uiLanguage: string): Promise<Buffer> => {
-  if (!isAdobeEnabled()) {
-    throw new Error("Adobe PDF Services is not enabled");
   }
 
-  const tempDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "docverse-adobe-ocr-"));
-  const inputPath = path.join(tempDir, "input.pdf");
-  await fs.promises.writeFile(inputPath, pdfBytes);
-
-  let readStream: fs.ReadStream | undefined;
-  try {
-    const clientId = process.env.ADOBE_CLIENT_ID;
-    const clientSecret = process.env.ADOBE_CLIENT_SECRET;
-
-    if (!clientId || !clientSecret) {
-      throw new Error("Adobe client credentials are not configured");
-    }
-
-    const credentials = new ServicePrincipalCredentials({ clientId, clientSecret });
-    const pdfServices = new PDFServices({ credentials });
-    const anyPdfServices = pdfServices as any;
-
-    readStream = fs.createReadStream(inputPath);
-    const inputAsset = await anyPdfServices.upload({
-      readStream,
-      mimeType: (MimeType as any).PDF,
-    });
-
-    const localeMap: Record<string, string[]> = {
-      en: ["EN_US"],
-      es: ["ES_ES", "ES_MX"],
-      fr: ["FR_FR"],
-      de: ["DE_DE"],
-      it: ["IT_IT"],
-      pt: ["PT_BR", "PT_PT"],
-      zh: ["ZH_CN", "ZH_TW"],
-      ja: ["JA_JP"],
-      ko: ["KO_KR"],
-      ar: ["AR_SA"],
-    };
-
-    const localeEnum = OCRSupportedLocale as any;
-    const supportedTypeEnum = OCRSupportedType as any;
-
-    let ocrLocale: any | undefined;
-    for (const candidate of localeMap[uiLanguage] || []) {
-      if (localeEnum && localeEnum[candidate]) {
-        ocrLocale = localeEnum[candidate];
-        break;
-      }
-    }
-
-    const ocrType =
-      (supportedTypeEnum && supportedTypeEnum.SEARCHABLE_IMAGE_EXACT) ||
-      (supportedTypeEnum && supportedTypeEnum.SEARCHABLE_IMAGE) ||
-      undefined;
-
-    const params =
-      ocrLocale || ocrType
-        ? new (OCRParams as any)({
-            ...(ocrLocale ? { ocrLocale } : {}),
-            ...(ocrType ? { ocrType } : {}),
-          })
-        : undefined;
-
-    const job = params
-      ? new (OCRJob as any)({ inputAsset, params })
-      : new (OCRJob as any)({ inputAsset });
-
-    const pollingURL: string = await anyPdfServices.submit({ job });
-    const ocrResult = (await anyPdfServices.getJobResult({
-      pollingURL,
-      resultType: OCRResult as any,
-    })) as any;
-
-    const resultAsset = ocrResult.result.asset;
-
-    if (typeof anyPdfServices.getContent === "function") {
-      const streamAsset = await anyPdfServices.getContent({ asset: resultAsset });
-      return await streamToBuffer(streamAsset.readStream);
-    }
-
-    const resultStream: AsyncIterable<Buffer | string> = await anyPdfServices.download({
-      asset: resultAsset,
-    });
-    const chunks: Buffer[] = [];
-    for await (const chunk of resultStream) {
-      chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
-    }
-    return Buffer.concat(chunks);
-  } finally {
-    try {
-      readStream?.destroy();
-    } catch {
-    }
-    try {
-      await fs.promises.rm(tempDir, { recursive: true, force: true });
-    } catch {
-    }
-  }
-};
-
-const convertPdfToOfficeWithAdobe = async (
-  format: PdfToOfficeFormat,
-  file: Express.Multer.File
-): Promise<PdfToOfficeResult> => {
-  if (!isAdobeEnabled()) {
-    throw new Error("Adobe PDF Services is not enabled");
-  }
-
-  const originalName = file.originalname || "document.pdf";
-  const dotIndex = originalName.lastIndexOf(".");
-  const base = dotIndex > 0 ? originalName.slice(0, dotIndex) : originalName;
-  const ext = getPdfToOfficeExtension(format);
-  const outputFilename = `${base}.${ext}`;
-
-  const tempDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "docverse-adobe-export-"));
-  const inputPath = path.join(tempDir, originalName);
-  await fs.promises.writeFile(inputPath, file.buffer);
-
-  let readStream: fs.ReadStream | undefined;
-  try {
-    const clientId = process.env.ADOBE_CLIENT_ID;
-    const clientSecret = process.env.ADOBE_CLIENT_SECRET;
-
-    if (!clientId || !clientSecret) {
-      throw new Error("Adobe client credentials are not configured");
-    }
-
-    const credentials = new ServicePrincipalCredentials({ clientId, clientSecret });
-    const pdfServices = new PDFServices({ credentials });
-    const anyPdfServices = pdfServices as any;
-
-    readStream = fs.createReadStream(inputPath);
-    const inputAsset = await anyPdfServices.upload({
-      readStream,
-      mimeType: (MimeType as any).PDF,
-    });
-
-    const params = new (ExportPDFParams as any)({
-      targetFormat: getPdfToOfficeTargetFormat(format),
-    });
-
-    const job = new (ExportPDFJob as any)({ inputAsset, params });
-
-    const pollingURL: string = await anyPdfServices.submit({ job });
-    const result = (await anyPdfServices.getJobResult({
-      pollingURL,
-      resultType: ExportPDFResult as any,
-    })) as any;
-
-    const resultAsset = result.result.asset;
-
-    if (typeof anyPdfServices.getContent === "function") {
-      const streamAsset = await anyPdfServices.getContent({ asset: resultAsset });
-      const outputBytes = await streamToBuffer(streamAsset.readStream);
-      return {
-        outputBytes,
-        outputFilename,
-        engine: "adobe",
-        contentType: getPdfToOfficeMime(format),
-      };
-    }
-
-    const resultStream: AsyncIterable<Buffer | string> = await anyPdfServices.download({
-      asset: resultAsset,
-    });
-    const chunks: Buffer[] = [];
-    for await (const chunk of resultStream) {
-      chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
-    }
-
-    return {
-      outputBytes: Buffer.concat(chunks),
-      outputFilename,
-      engine: "adobe",
-      contentType: getPdfToOfficeMime(format),
-    };
-  } finally {
-    try {
-      readStream?.destroy();
-    } catch {
-    }
-    try {
-      await fs.promises.rm(tempDir, { recursive: true, force: true });
-    } catch {
-    }
-  }
-};
-
-const convertPdfToOfficeWithLibreOffice = async (
-  format: PdfToOfficeFormat,
-  file: Express.Multer.File
-): Promise<PdfToOfficeResult> => {
-  const tempDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "docverse-pdf-office-"));
-
-  const originalName = file.originalname || "document.pdf";
-  const dotIndex = originalName.lastIndexOf(".");
-  const base = dotIndex > 0 ? originalName.slice(0, dotIndex) : originalName;
-
-  const inputPath = path.join(tempDir, originalName);
-  await fs.promises.writeFile(inputPath, file.buffer);
-
-  const ext = getPdfToOfficeExtension(format);
-  const outputFilename = `${base}.${ext}`;
-  const outputPath = path.join(tempDir, outputFilename);
-
-  try {
-    await execFileAsync("soffice", [
-      "--headless",
-      "--convert-to",
-      ext,
-      "--outdir",
-      tempDir,
-      inputPath,
-    ]);
-
-    const outputBytes = await fs.promises.readFile(outputPath);
-    return {
-      outputBytes,
-      outputFilename,
-      engine: "libreoffice",
-      contentType: getPdfToOfficeMime(format),
-    };
-  } finally {
-    try {
-      await fs.promises.rm(tempDir, { recursive: true, force: true });
-    } catch {
-    }
-  }
-};
-
-const convertPdfToOffice = async (
-  format: PdfToOfficeFormat,
-  file: Express.Multer.File
-): Promise<PdfToOfficeResult> => {
-  const useAdobeAsPrimary = process.env.USE_ADOBE_AS_PRIMARY === "true";
-
-  if (useAdobeAsPrimary && isAdobeEnabled()) {
-    try {
-      return await convertPdfToOfficeWithAdobe(format, file);
-    } catch (error) {
-      console.error("Adobe PDF Services export failed", error);
-      return convertPdfToOfficeWithLibreOffice(format, file);
-    }
-  }
-
-  try {
-    return await convertPdfToOfficeWithLibreOffice(format, file);
-  } catch (error) {
-    console.error("LibreOffice export failed", error);
-    return convertPdfToOfficeWithAdobe(format, file);
-  }
-};
-
-const getDefaultOriginalName = (format: OfficeFormat): string => {
-  if (format === "word") return "document.docx";
-  if (format === "excel") return "spreadsheet.xlsx";
-  return "presentation.pptx";
-};
-
-const convertWithAdobe = async (
-  format: OfficeFormat,
-  file: Express.Multer.File
-): Promise<ConversionResult> => {
-  if (!isAdobeEnabled()) {
-    throw new Error("Adobe PDF Services is not enabled");
-  }
-
-  const originalName = file.originalname || getDefaultOriginalName(format);
-  const dotIndex = originalName.lastIndexOf(".");
-  const base = dotIndex > 0 ? originalName.slice(0, dotIndex) : originalName;
-
-  // Write buffer to a temporary file because the SDK works with file paths/streams
-  const tempDir = await fs.promises.mkdtemp(
-    path.join(os.tmpdir(), "docverse-adobe-")
-  );
-  const inputPath = path.join(tempDir, originalName);
-  await fs.promises.writeFile(inputPath, file.buffer);
-
-  try {
-    const clientId = process.env.ADOBE_CLIENT_ID;
-    const clientSecret = process.env.ADOBE_CLIENT_SECRET;
-
-    if (!clientId || !clientSecret) {
-      throw new Error("Adobe client credentials are not configured");
-    }
-
-    const credentials = new ServicePrincipalCredentials({
-      clientId,
-      clientSecret,
-    });
-
-    const pdfServices = new PDFServices({ credentials });
-
-    const ext = path.extname(originalName).toLowerCase();
-    let mimeType: MimeType;
-    if (ext === ".doc" || ext === ".docx") {
-      mimeType = MimeType.DOCX;
-    } else if (ext === ".xls" || ext === ".xlsx") {
-      mimeType = MimeType.XLSX;
-    } else if (ext === ".ppt" || ext === ".pptx") {
-      mimeType = MimeType.PPTX;
-    } else {
-      // Fallback: try as DOCX
-      mimeType = MimeType.DOCX;
-    }
-
-    const readStream = fs.createReadStream(inputPath);
-
-    // The official SDK examples are written in JS and the published
-    // TypeScript types are slightly restrictive. Use `any` casts around
-    // the SDK calls so we can follow the documented calling pattern.
-    const anyPdfServices = pdfServices as any;
-
-    const inputAsset = await anyPdfServices.upload({ readStream, mimeType });
-
-    const createPDFJob = new (CreatePDFJob as any)({ inputAsset });
-
-    // For SDK v4.1.0, use submit + getJobResult with an options object.
-    const pollingURL: string = await anyPdfServices.submit({ job: createPDFJob });
-    const pdfResult = (await anyPdfServices.getJobResult({
-      pollingURL,
-      resultType: CreatePDFResult as any,
-    })) as any;
-
-    const resultAsset = pdfResult.result.asset;
-
-    if (typeof anyPdfServices.getContent === "function") {
-      const streamAsset = await anyPdfServices.getContent({ asset: resultAsset });
-      const pdfBytes = await streamToBuffer(streamAsset.readStream);
-
-      return {
-        pdfBytes,
-        outputFilename: `${base}.pdf`,
-        engine: "adobe",
-      };
-    } else {
-      const resultStream: AsyncIterable<Buffer | string> = await anyPdfServices.download({
-        asset: resultAsset,
-      });
-      const chunks: Buffer[] = [];
-      for await (const chunk of resultStream) {
-        chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
-      }
-
-      const pdfBytes = Buffer.concat(chunks);
-
-      return {
-        pdfBytes,
-        outputFilename: `${base}.pdf`,
-        engine: "adobe",
-      };
-    }
-  } finally {
-    try {
-      await fs.promises.rm(tempDir, { recursive: true, force: true });
-    } catch {
-    }
-  }
-};
-
-const convertWithLibreOffice = async (
-  format: OfficeFormat,
-  file: Express.Multer.File
-): Promise<ConversionResult> => {
-  const tempDir = await fs.promises.mkdtemp(
-    path.join(os.tmpdir(), "docverse-office-")
-  );
-
-  const originalName = file.originalname || getDefaultOriginalName(format);
-  const dotIndex = originalName.lastIndexOf(".");
-  const base = dotIndex > 0 ? originalName.slice(0, dotIndex) : originalName;
-  const inputPath = path.join(tempDir, originalName);
-
-  await fs.promises.writeFile(inputPath, file.buffer);
-
-  try {
-    await execFileAsync("soffice", [
-      "--headless",
-      "--convert-to",
-      "pdf",
-      "--outdir",
-      tempDir,
-      inputPath,
-    ]);
-
-    const outputPath = path.join(tempDir, `${base}.pdf`);
-    const pdfBytes = await fs.promises.readFile(outputPath);
-
-    return {
-      pdfBytes,
-      outputFilename: `${base}.pdf`,
-      engine: "libreoffice",
-    };
-  } finally {
-    try {
-      await fs.promises.rm(tempDir, { recursive: true, force: true });
-    } catch {
-    }
-  }
-};
-
-const convertOfficeToPdf = async (
-  format: OfficeFormat,
-  file: Express.Multer.File
-): Promise<ConversionResult> => {
-  const useAdobeAsPrimary = process.env.USE_ADOBE_AS_PRIMARY === "true";
-
-  if (useAdobeAsPrimary && isAdobeEnabled()) {
-    try {
-      return await convertWithAdobe(format, file);
-    } catch (error) {
-      console.error("Adobe PDF Services conversion failed", error);
-      return convertWithLibreOffice(format, file);
-    }
-  }
-
-  // Default: use LibreOffice as primary (and only) engine
-  return convertWithLibreOffice(format, file);
+  next();
 };
 
 const upload = multer({
@@ -523,15 +91,48 @@ const upload = multer({
   },
 });
 
-app.use(cors());
+const MAX_PDF_TO_OFFICE_PAGES = 50;
+
+const getPdfPageCountFromBuffer = async (buffer: Buffer): Promise<number> => {
+  const pdf = await PDFDocument.load(buffer, { updateMetadata: false });
+  return pdf.getPageCount();
+};
+
+app.use(
+  cors({
+    exposedHeaders: ["Content-Disposition", "Content-Type"],
+  })
+);
 app.use(helmet());
 app.use(express.json());
+app.use(rateLimitMiddleware);
 
 app.get("/", (_req: Request, res: Response) => {
   res.json({
     status: "ok",
     service: "docverse-backend",
     message: "DocVerse backend is running. Use /health for health checks and /upload for uploads.",
+  });
+});
+
+app.get("/version", (_req: Request, res: Response) => {
+  const pkgVersion = process.env.npm_package_version || "unknown";
+  res.json({
+    status: "ok",
+    service: "docverse-backend",
+    version: pkgVersion,
+    node: process.version,
+    env: process.env.NODE_ENV || "unknown",
+    adobeEnabled: isAdobeEnabled(),
+    useAdobeAsPrimary: process.env.USE_ADOBE_AS_PRIMARY === "true",
+    rateLimit: {
+      enabled: RATE_LIMIT_ENABLED,
+      windowMs: RATE_LIMIT_WINDOW_MS,
+      max: RATE_LIMIT_MAX,
+    },
+    build: {
+      gitSha: process.env.GIT_SHA || process.env.RENDER_GIT_COMMIT || null,
+    },
   });
 });
 
@@ -548,7 +149,7 @@ app.post("/upload", (req: Request, res: Response) => {
   });
 });
 
-app.post("/merge-pdf", upload.array("files", 5), async (req: Request, res: Response) => {
+app.post("/merge-pdf", upload.array("files", 10), async (req: Request, res: Response) => {
   try {
     const files = req.files as Express.Multer.File[];
 
@@ -593,7 +194,7 @@ app.post("/merge-pdf", upload.array("files", 5), async (req: Request, res: Respo
   }
 });
 
-app.post("/ocr-searchable-pdf", upload.array("files", 10), async (req: Request, res: Response) => {
+app.post("/ocr-searchable-pdf", upload.array("files", 5), async (req: Request, res: Response) => {
   try {
     const files = req.files as Express.Multer.File[] | undefined;
 
@@ -615,24 +216,12 @@ app.post("/ocr-searchable-pdf", upload.array("files", 10), async (req: Request, 
     }
 
     const uiLanguage = (req.body.language as string) || "en";
-    const tesseractLangMap: Record<string, string> = {
-      en: "eng",
-      es: "spa",
-      fr: "fra",
-      de: "deu",
-      it: "ita",
-      pt: "por",
-      zh: "chi_sim",
-      ja: "jpn",
-      ko: "kor",
-      ar: "ara",
-    };
-    const language = tesseractLangMap[uiLanguage] || "eng";
 
-    // Simple page-count limit to keep OCR requests reasonable
     const MAX_OCR_PAGES = 50;
+    const MAX_OCR_IMAGES = 30;
 
     let totalPages = 0;
+    let imageCount = 0;
     for (const file of files) {
       const lowerName = (file.originalname || "").toLowerCase();
       const isPdf = file.mimetype === "application/pdf" || lowerName.endsWith(".pdf");
@@ -641,57 +230,28 @@ app.post("/ocr-searchable-pdf", upload.array("files", 10), async (req: Request, 
           const pdfDoc = await PDFDocument.load(file.buffer);
           totalPages += pdfDoc.getPageCount();
         } catch {
-          // If we can't read page count, skip adding; OCR may still try but page limit won't apply from count.
+          // ignore
         }
       } else {
+        imageCount += 1;
         totalPages += 1;
       }
       if (totalPages > MAX_OCR_PAGES) break;
     }
 
-    if (totalPages > MAX_OCR_PAGES) {
+    if (imageCount > MAX_OCR_IMAGES) {
       return res.status(413).json({
         status: "error",
-        message: `This request contains approximately ${totalPages} pages. OCR is limited to ${MAX_OCR_PAGES} pages per request. Please split your PDF first (for example using Split PDF) and try again.`,
+        message: `OCR supports up to ${MAX_OCR_IMAGES} images per request. Please upload fewer images and try again.`,
       });
     }
 
-    const safeRemovePath = async (targetPath: string) => {
-      try {
-        const stat = await fs.promises.stat(targetPath);
-        if (stat.isDirectory()) {
-          await fs.promises.rm(targetPath, { recursive: true, force: true });
-        } else {
-          await fs.promises.unlink(targetPath);
-        }
-      } catch {
-        // ignore cleanup errors
-      }
-    };
-
-    // Convert a PDF to multiple JPEGs (all pages) at reduced DPI
-    const convertPdfToJpegPages = async (pdfPath: string): Promise<string[]> => {
-      const outputBase = pdfPath.replace(/\.[^.]+$/, "");
-      const args = ["-jpeg", "-r", "120", pdfPath, outputBase];
-      await execFileAsync("pdftoppm", args);
-
-      const jpgPaths: string[] = [];
-      let pageIndex = 1;
-      while (true) {
-        const candidate = `${outputBase}-${pageIndex}.jpg`;
-        try {
-          await fs.promises.access(candidate, fs.constants.F_OK);
-          jpgPaths.push(candidate);
-          pageIndex++;
-        } catch {
-          break;
-        }
-      }
-      return jpgPaths;
-    };
-
-    const perPagePdfPaths: string[] = [];
-    const tempRoots: string[] = [];
+    if (totalPages > MAX_OCR_PAGES) {
+      return res.status(413).json({
+        status: "error",
+        message: `This request contains approximately ${totalPages} pages. OCR is limited to ${MAX_OCR_PAGES} pages per request. Please split your PDF first and try again.`,
+      });
+    }
 
     const useAdobeAsPrimary = process.env.USE_ADOBE_AS_PRIMARY === "true";
 
@@ -724,84 +284,9 @@ app.post("/ocr-searchable-pdf", upload.array("files", 10), async (req: Request, 
     }
 
     try {
-      for (const [index, file] of files.entries()) {
-        const originalName = file.originalname || `file-${index + 1}`;
-        const lowerName = originalName.toLowerCase();
-        const isPdf = file.mimetype === "application/pdf" || lowerName.endsWith(".pdf");
-
-        let tempRootDir: string | null = null;
-
-        try {
-          if (isPdf) {
-            tempRootDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "docverse-ocrsp-pdf-"));
-            const pdfPath = path.join(tempRootDir, "input.pdf");
-            await fs.promises.writeFile(pdfPath, file.buffer);
-
-            const jpgPaths = await convertPdfToJpegPages(pdfPath);
-            for (const [pageIdx, jpgPath] of jpgPaths.entries()) {
-              const outputBase = jpgPath.replace(/\.[^.]+$/, "-ocrsp");
-              const args = [jpgPath, outputBase, "-l", language, "pdf"]; // searchable PDF per page
-              await execFileAsync("tesseract", args);
-              const pagePdfPath = `${outputBase}.pdf`;
-              perPagePdfPaths.push(pagePdfPath);
-            }
-          } else {
-            const extMatch = lowerName.match(/\.([a-z0-9]+)$/);
-            const ext = extMatch ? extMatch[1] : "png";
-            tempRootDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "docverse-ocrsp-img-"));
-            const imgPath = path.join(tempRootDir, `input.${ext}`);
-            await fs.promises.writeFile(imgPath, file.buffer);
-
-            const outputBase = imgPath.replace(/\.[^.]+$/, "-ocrsp");
-            const args = [imgPath, outputBase, "-l", language, "pdf"]; // searchable PDF for image
-            await execFileAsync("tesseract", args);
-            const imgPdfPath = `${outputBase}.pdf`;
-            perPagePdfPaths.push(imgPdfPath);
-          }
-
-          if (tempRootDir) {
-            tempRoots.push(tempRootDir);
-          }
-        } catch (fileErr) {
-          console.error("Error processing file for searchable PDF OCR", originalName, fileErr);
-          if (tempRootDir) {
-            tempRoots.push(tempRootDir);
-          }
-        }
-      }
-
-      if (perPagePdfPaths.length === 0) {
-        return res.status(500).json({
-          status: "error",
-          message:
-            "Failed to generate searchable PDF. Please ensure Tesseract and pdftoppm are installed and try again.",
-        });
-      }
-
-      const finalDoc = await PDFDocument.create();
-
-      for (const pagePdfPath of perPagePdfPaths) {
-        try {
-          const pdfBytes = await fs.promises.readFile(pagePdfPath);
-          const srcDoc = await PDFDocument.load(pdfBytes);
-          const srcPages = await finalDoc.copyPages(srcDoc, srcDoc.getPageIndices());
-          for (const p of srcPages) {
-            finalDoc.addPage(p);
-          }
-        } catch (mergeErr) {
-          console.error("Error merging OCR PDF page", pagePdfPath, mergeErr);
-        }
-      }
-
-      const finalBytes = await finalDoc.save();
-
-      // Cleanup temp dirs and per-page PDFs
-      for (const tmpRoot of tempRoots) {
-        await safeRemovePath(tmpRoot);
-      }
-
+      const finalBytes = await ocrSearchablePdfWithTesseract(files, uiLanguage);
       const filename = "ocr-searchable.pdf";
-      res
+      return res
         .status(200)
         .contentType("application/pdf")
         .setHeader("X-Conversion-Engine", "tesseract")
@@ -809,9 +294,6 @@ app.post("/ocr-searchable-pdf", upload.array("files", 10), async (req: Request, 
         .send(Buffer.from(finalBytes));
     } catch (err) {
       console.error("Error in /ocr-searchable-pdf pipeline", err);
-      for (const tmpRoot of tempRoots) {
-        await safeRemovePath(tmpRoot);
-      }
       return res.status(500).json({
         status: "error",
         message: "Failed to generate searchable PDF. Please try again.",
@@ -849,6 +331,46 @@ app.post("/split-pdf", upload.single("file"), async (req: Request, res: Response
 
     const srcPdf = await PDFDocument.load(file.buffer);
     const totalPages = srcPdf.getPageCount();
+
+    const MAX_OUTPUT_PDFS = 50;
+    const computeOutputPdfCount = (): number | null => {
+      if (mode === "half") return 2;
+
+      if (mode === "each") {
+        return totalPages;
+      }
+
+      if (mode === "range") {
+        if (rangeMode === "fixed") {
+          const chunkSize = parseInt(req.body.chunkSize, 10) || 1;
+          if (chunkSize <= 0) return null;
+          return Math.ceil(totalPages / chunkSize);
+        }
+
+        let ranges: { from: number; to: number }[] = [];
+        if (req.body.ranges) {
+          try {
+            ranges = JSON.parse(req.body.ranges as string);
+          } catch {
+            return null;
+          }
+        }
+
+        if (!Array.isArray(ranges) || ranges.length === 0) return null;
+        const valid = ranges.filter((r) => typeof r?.from === "number" && typeof r?.to === "number");
+        return valid.length;
+      }
+
+      return null;
+    };
+
+    const outputCount = computeOutputPdfCount();
+    if (typeof outputCount === "number" && outputCount > MAX_OUTPUT_PDFS) {
+      return res.status(413).json({
+        status: "error",
+        message: `This split would generate ${outputCount} PDF files. The limit is ${MAX_OUTPUT_PDFS}. Please increase the chunk size, reduce ranges, or select fewer pages.`,
+      });
+    }
 
     const zip = new JSZip();
 
@@ -946,24 +468,22 @@ app.post("/split-pdf", upload.single("file"), async (req: Request, res: Response
   }
 });
 
-app.post("/compress-pdf", upload.array("files", 10), async (req: Request, res: Response) => {
+app.post("/compress-pdf", upload.single("files"), async (req: Request, res: Response) => {
   try {
-    const files = req.files as Express.Multer.File[];
+    const file = req.file as Express.Multer.File | undefined;
 
-    if (!files || files.length === 0) {
+    if (!file) {
       return res.status(400).json({
         status: "error",
-        message: "Please upload at least one PDF file to compress.",
+        message: "Please upload a PDF file to compress.",
       });
     }
 
-    const totalSize = files.reduce((sum, file) => sum + file.size, 0);
-    const maxTotal = 100 * 1024 * 1024; // 100MB total
-
-    if (totalSize > maxTotal) {
+    const maxTotal = 100 * 1024 * 1024; // 100MB
+    if (file.size > maxTotal) {
       return res.status(413).json({
         status: "error",
-        message: "Total size of uploaded files exceeds 100MB.",
+        message: "Uploaded file exceeds 100MB limit.",
       });
     }
 
@@ -986,193 +506,19 @@ app.post("/compress-pdf", upload.array("files", 10), async (req: Request, res: R
 
     const { preset: pdfSettings, dpi } = mapQualityToPdfSettings(clampedQuality);
 
-    const isWindows = process.platform === "win32";
-    const gsPath = process.env.GS_PATH || (isWindows ? "gswin64c" : "gs");
+    const { bytes, engine } = await compressPdfFile(file, { pdfSettings, dpi });
 
-    // Helper to compress a single PDF buffer with Ghostscript.
-    const compressWithGhostscript = async (inputBuffer: Buffer): Promise<Buffer> => {
-      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "docverse-compress-"));
-      const inputPath = path.join(tmpDir, "input.pdf");
-      const outputPath = path.join(tmpDir, "output.pdf");
+    const originalName = file.originalname || "document.pdf";
+    const dotIndex = originalName.lastIndexOf(".");
+    const base = dotIndex > 0 ? originalName.slice(0, dotIndex) : originalName;
+    const compressedName = `${base}-compressed.pdf`;
 
-      fs.writeFileSync(inputPath, inputBuffer);
-
-      try {
-        const args = [
-          "-sDEVICE=pdfwrite",
-          "-dCompatibilityLevel=1.4",
-          `-dPDFSETTINGS=${pdfSettings}`,
-          // Image downsampling tuned by effective DPI derived from quality slider
-          "-dDownsampleColorImages=true",
-          "-dColorImageDownsampleType=/Bicubic",
-          `-dColorImageResolution=${dpi}`,
-          "-dDownsampleGrayImages=true",
-          "-dGrayImageDownsampleType=/Bicubic",
-          `-dGrayImageResolution=${dpi}`,
-          "-dDownsampleMonoImages=true",
-          "-dMonoImageDownsampleType=/Subsample",
-          `-dMonoImageResolution=${dpi}`,
-          "-dNOPAUSE",
-          "-dQUIET",
-          "-dBATCH",
-          `-sOutputFile=${outputPath}`,
-          inputPath,
-        ];
-
-        await execFileAsync(gsPath, args);
-
-        const compressed = fs.readFileSync(outputPath);
-        return compressed;
-      } finally {
-        try {
-          fs.rmSync(tmpDir, { recursive: true, force: true });
-        } catch {
-          // ignore cleanup errors
-        }
-      }
-    };
-
-    // Helper to compress a PDF using Adobe PDF Services Compress PDF
-    const compressWithAdobe = async (file: Express.Multer.File): Promise<Buffer> => {
-      if (!isAdobeEnabled()) {
-        throw new Error("Adobe PDF Services is not enabled");
-      }
-
-      const originalName = file.originalname || "document.pdf";
-
-      const tempDir = await fs.promises.mkdtemp(
-        path.join(os.tmpdir(), "docverse-adobe-compress-")
-      );
-      const inputPath = path.join(tempDir, originalName);
-      await fs.promises.writeFile(inputPath, file.buffer);
-
-      let readStream: fs.ReadStream | undefined;
-      try {
-        const clientId = process.env.ADOBE_CLIENT_ID;
-        const clientSecret = process.env.ADOBE_CLIENT_SECRET;
-
-        if (!clientId || !clientSecret) {
-          throw new Error("Adobe client credentials are not configured");
-        }
-
-        const credentials = new ServicePrincipalCredentials({ clientId, clientSecret });
-        const pdfServices = new PDFServices({ credentials });
-        const anyPdfServices = pdfServices as any;
-
-        readStream = fs.createReadStream(inputPath);
-        const inputAsset = await anyPdfServices.upload({
-          readStream,
-          mimeType: (MimeType as any).PDF,
-        });
-
-        const job = new (CompressPDFJob as any)({ inputAsset });
-
-        const pollingURL: string = await anyPdfServices.submit({ job });
-        const pdfResult = (await anyPdfServices.getJobResult({
-          pollingURL,
-          resultType: CompressPDFResult as any,
-        })) as any;
-
-        const resultAsset = pdfResult.result.asset;
-
-        if (typeof anyPdfServices.getContent === "function") {
-          const streamAsset = await anyPdfServices.getContent({ asset: resultAsset });
-          const pdfBytes = await streamToBuffer(streamAsset.readStream);
-          return pdfBytes;
-        }
-
-        const resultStream: AsyncIterable<Buffer | string> = await anyPdfServices.download({
-          asset: resultAsset,
-        });
-        const chunks: Buffer[] = [];
-        for await (const chunk of resultStream) {
-          chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
-        }
-        return Buffer.concat(chunks);
-      } finally {
-        try {
-          readStream?.destroy();
-        } catch {
-        }
-        try {
-          await fs.promises.rm(tempDir, { recursive: true, force: true });
-        } catch {
-        }
-      }
-    };
-
-    const useAdobeAsPrimary = process.env.USE_ADOBE_AS_PRIMARY === "true";
-
-    const compressFile = async (
-      file: Express.Multer.File
-    ): Promise<{ bytes: Buffer; engine: "adobe" | "ghostscript" }> => {
-      if (useAdobeAsPrimary && isAdobeEnabled()) {
-        try {
-          const adobeBytes = await compressWithAdobe(file);
-          const chosenBytes =
-            adobeBytes.length >= file.buffer.length ? file.buffer : adobeBytes;
-          return { bytes: chosenBytes, engine: "adobe" };
-        } catch (error) {
-          console.error("Adobe PDF Services compression failed", error);
-          const gsBytes = await compressWithGhostscript(file.buffer);
-          const chosenBytes =
-            gsBytes.length >= file.buffer.length ? file.buffer : gsBytes;
-          return { bytes: chosenBytes, engine: "ghostscript" };
-        }
-      }
-
-      const gsBytes = await compressWithGhostscript(file.buffer);
-      const chosenBytes =
-        gsBytes.length >= file.buffer.length ? file.buffer : gsBytes;
-      return { bytes: chosenBytes, engine: "ghostscript" };
-    };
-
-    // If only a single file is uploaded, return a single compressed PDF instead of a ZIP.
-    // If compression does not actually reduce size, fall back to the original bytes so the
-    // file is never larger than the input.
-    if (files.length === 1) {
-      const file = files[0];
-      const { bytes, engine } = await compressFile(file);
-
-      const originalName = file.originalname || "document.pdf";
-      const dotIndex = originalName.lastIndexOf(".");
-      const base = dotIndex > 0 ? originalName.slice(0, dotIndex) : originalName;
-      const compressedName = `${base}-compressed.pdf`;
-
-      return res
-        .status(200)
-        .contentType("application/pdf")
-        .setHeader("X-Conversion-Engine", engine)
-        .setHeader("Content-Disposition", `attachment; filename=${compressedName}`)
-        .send(Buffer.from(bytes));
-    }
-
-    // Multiple files: compress each and return a ZIP archive. For each file, if
-    // compression does not reduce size, fall back to the original bytes.
-    const zip = new JSZip();
-    const engines = new Set<string>();
-
-    for (const file of files) {
-      const { bytes, engine } = await compressFile(file);
-
-      const originalName = file.originalname || "document.pdf";
-      const dotIndex = originalName.lastIndexOf(".");
-      const base = dotIndex > 0 ? originalName.slice(0, dotIndex) : originalName;
-      const compressedName = `${base}-compressed.pdf`;
-
-      zip.file(compressedName, bytes);
-      engines.add(engine);
-    }
-
-    const zipBytes = await zip.generateAsync({ type: "nodebuffer" });
-    const engineHeader = engines.size === 1 ? Array.from(engines)[0] : "mixed";
-
-    res
+    return res
       .status(200)
-      .contentType("application/zip")
-      .setHeader("X-Conversion-Engine", engineHeader)
-      .setHeader("Content-Disposition", "attachment; filename=compressed-pdfs.zip")
-      .send(zipBytes);
+      .contentType("application/pdf")
+      .setHeader("X-Conversion-Engine", engine)
+      .setHeader("Content-Disposition", `attachment; filename=${compressedName}`)
+      .send(Buffer.from(bytes));
   } catch (error) {
     console.error("Error compressing PDFs", error);
     res.status(500).json({
@@ -1209,6 +555,24 @@ app.post("/convert/pdf-to-word", upload.array("files", 10), async (req: Request,
         return res.status(413).json({
           status: "error",
           message: "Uploaded file exceeds 100MB limit.",
+        });
+      }
+    }
+
+    let totalPages = 0;
+    for (const file of files) {
+      try {
+        totalPages += await getPdfPageCountFromBuffer(file.buffer);
+      } catch {
+        return res.status(400).json({
+          status: "error",
+          message: "One or more uploaded files could not be read as a valid PDF.",
+        });
+      }
+      if (totalPages > MAX_PDF_TO_OFFICE_PAGES) {
+        return res.status(413).json({
+          status: "error",
+          message: `PDF to Word supports up to ${MAX_PDF_TO_OFFICE_PAGES} pages total per conversion request.`,
         });
       }
     }
@@ -1281,6 +645,24 @@ app.post("/convert/pdf-to-excel", upload.array("files", 10), async (req: Request
       }
     }
 
+    let totalPages = 0;
+    for (const file of files) {
+      try {
+        totalPages += await getPdfPageCountFromBuffer(file.buffer);
+      } catch {
+        return res.status(400).json({
+          status: "error",
+          message: "One or more uploaded files could not be read as a valid PDF.",
+        });
+      }
+      if (totalPages > MAX_PDF_TO_OFFICE_PAGES) {
+        return res.status(413).json({
+          status: "error",
+          message: `PDF to Excel supports up to ${MAX_PDF_TO_OFFICE_PAGES} pages total per conversion request.`,
+        });
+      }
+    }
+
     if (files.length === 1) {
       const file = files[0];
       const { outputBytes, outputFilename, engine, contentType } = await convertPdfToOffice("excel", file);
@@ -1345,6 +727,24 @@ app.post("/convert/pdf-to-powerpoint", upload.array("files", 10), async (req: Re
         return res.status(413).json({
           status: "error",
           message: "Uploaded file exceeds 100MB limit.",
+        });
+      }
+    }
+
+    let totalPages = 0;
+    for (const file of files) {
+      try {
+        totalPages += await getPdfPageCountFromBuffer(file.buffer);
+      } catch {
+        return res.status(400).json({
+          status: "error",
+          message: "One or more uploaded files could not be read as a valid PDF.",
+        });
+      }
+      if (totalPages > MAX_PDF_TO_OFFICE_PAGES) {
+        return res.status(413).json({
+          status: "error",
+          message: `PDF to PowerPoint supports up to ${MAX_PDF_TO_OFFICE_PAGES} pages total per conversion request.`,
         });
       }
     }
@@ -1631,6 +1031,22 @@ app.post("/pdf-to-image", upload.single("file"), async (req: Request, res: Respo
     const qualityRaw = parseInt((req.body.quality as string) || "80", 10);
     const quality = Number.isFinite(qualityRaw) ? Math.min(Math.max(qualityRaw, 30), 100) : 80;
 
+    // Page cap for expensive rendering mode
+    if (mode === "pageToJpg") {
+      try {
+        const pdfDoc = await PDFDocument.load(file.buffer);
+        const pageCount = pdfDoc.getPageCount();
+        if (pageCount > 50) {
+          return res.status(413).json({
+            status: "error",
+            message: "This PDF has more than 50 pages. Please split the PDF first and try again.",
+          });
+        }
+      } catch {
+        // If we can't read page count, allow the conversion to proceed.
+      }
+    }
+
     const safeRemovePath = async (targetPath: string) => {
       try {
         const stat = await fs.promises.stat(targetPath);
@@ -1891,7 +1307,7 @@ app.post("/image-to-pdf", upload.array("files", 50), async (req: Request, res: R
   }
 });
 
-app.post("/ocr", upload.array("files", 10), async (req: Request, res: Response) => {
+app.post("/ocr", upload.array("files", 5), async (req: Request, res: Response) => {
   try {
     const files = req.files as Express.Multer.File[] | undefined;
 

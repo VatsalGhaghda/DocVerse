@@ -1,61 +1,72 @@
 import { Link } from "react-router-dom";
-import { FileText, Github, Twitter, Linkedin } from "lucide-react";
+import { Github, Linkedin, Mail } from "lucide-react";
+import { DocVerseLogo } from "@/components/DocVerseLogo";
 
-const footerLinks = {
-  Tools: [
-    { name: "Merge PDF", href: "/merge" },
-    { name: "Split PDF", href: "/split" },
-    { name: "Compress PDF", href: "/compress" },
-    { name: "Convert to PDF", href: "/convert" },
-    { name: "OCR Scanner", href: "/ocr" },
-  ],
-  Company: [
-    { name: "About", href: "/about" },
-    { name: "Pricing", href: "/pricing" },
-    { name: "Blog", href: "/blog" },
-    { name: "Careers", href: "/careers" },
-  ],
-  Support: [
-    { name: "Help Center", href: "/help" },
-    { name: "Contact", href: "/contact" },
-    { name: "API Docs", href: "/docs" },
-    { name: "Status", href: "/status" },
-  ],
-  Legal: [
-    { name: "Privacy Policy", href: "/privacy" },
-    { name: "Terms of Service", href: "/terms" },
-    { name: "Cookie Policy", href: "/cookies" },
-  ],
-};
+const footerSections: Array<{
+  title: string;
+  links: Array<{ name: string; href: string }>;
+}> = [
+  {
+    title: "Core tools",
+    links: [
+      { name: "Merge PDF", href: "/merge" },
+      { name: "Split PDF", href: "/split" },
+      { name: "Compress PDF", href: "/compress" },
+      { name: "OCR Scanner", href: "/ocr" },
+      { name: "Sign PDF", href: "/sign" },
+    ],
+  },
+  {
+    title: "Convert",
+    links: [
+      { name: "PDF to Word", href: "/pdf-to-word" },
+      { name: "PDF to Excel", href: "/pdf-to-excel" },
+      { name: "PDF to PowerPoint", href: "/pdf-to-powerpoint" },
+      { name: "PDF to Image", href: "/pdf-to-image" },
+      { name: "Image to PDF", href: "/image-to-pdf" },
+    ],
+  },
+  {
+    title: "Edit & organize",
+    links: [
+      { name: "Organize PDF", href: "/organize" },
+      { name: "Add Page Numbers", href: "/page-numbers" },
+      { name: "Watermark PDF", href: "/watermark" },
+    ],
+  },
+  {
+    title: "Security",
+    links: [
+      { name: "Protect PDF", href: "/protect" },
+      { name: "Unlock PDF", href: "/unlock" },
+      { name: "About", href: "/about" },
+    ],
+  },
+];
 
 export function Footer() {
   return (
     <footer className="border-t border-border bg-muted/30">
       <div className="container mx-auto px-4 py-12 lg:py-16">
-        <div className="grid gap-8 lg:grid-cols-6">
+        <div className="grid gap-10 md:grid-cols-2 lg:grid-cols-6">
           {/* Brand */}
           <div className="lg:col-span-2">
             <Link to="/" className="mb-4 inline-flex items-center gap-2">
-              <div className="flex h-9 w-9 items-center justify-center rounded-lg gradient-primary">
-                <FileText className="h-5 w-5 text-primary-foreground" />
-              </div>
+              <DocVerseLogo size={26} zoom={2.6} className="h-[26px] w-[26px] rounded-md" alt="DocVerse" />
               <span className="text-xl font-bold">DocVerse</span>
             </Link>
             <p className="mb-6 max-w-xs text-sm text-muted-foreground">
-              Professional document processing tools trusted by millions. 
-              Simple, secure, and lightning fast.
+              A clean, modern PDF toolkit built as a project—focused on usability and real features.
             </p>
             <div className="flex gap-4">
               <a
-                href="https://twitter.com"
-                target="_blank"
-                rel="noopener noreferrer"
+                href="mailto:ghaghdavatsal0@gmail.com"
                 className="text-muted-foreground transition-colors hover:text-foreground"
               >
-                <Twitter className="h-5 w-5" />
+                <Mail className="h-5 w-5" />
               </a>
               <a
-                href="https://github.com"
+                href="https://github.com/VatsalGhaghda"
                 target="_blank"
                 rel="noopener noreferrer"
                 className="text-muted-foreground transition-colors hover:text-foreground"
@@ -63,7 +74,7 @@ export function Footer() {
                 <Github className="h-5 w-5" />
               </a>
               <a
-                href="https://linkedin.com"
+                href="https://www.linkedin.com/in/vatsal-ghaghda/"
                 target="_blank"
                 rel="noopener noreferrer"
                 className="text-muted-foreground transition-colors hover:text-foreground"
@@ -74,11 +85,11 @@ export function Footer() {
           </div>
 
           {/* Links */}
-          {Object.entries(footerLinks).map(([category, links]) => (
-            <div key={category}>
-              <h4 className="mb-4 font-semibold">{category}</h4>
+          {footerSections.map((section) => (
+            <div key={section.title} className="lg:col-span-1">
+              <h4 className="mb-4 font-semibold">{section.title}</h4>
               <ul className="space-y-3">
-                {links.map((link) => (
+                {section.links.map((link) => (
                   <li key={link.name}>
                     <Link
                       to={link.href}

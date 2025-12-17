@@ -5,6 +5,8 @@ import { Slider } from "@/components/ui/slider";
 import { Label } from "@/components/ui/label";
 import { ToolPageLayout } from "@/components/ToolPageLayout";
 import { FileUploadZone } from "@/components/FileUploadZone";
+import { ToolProcessingState } from "@/components/ToolProcessingState";
+import { xhrUploadForBlob, XhrUploadError } from "@/lib/xhrUpload";
 
 export default function CompressPDF() {
   const [files, setFiles] = useState<any[]>([]);
@@ -32,65 +34,40 @@ export default function CompressPDF() {
     setError(null);
     setProgress(0);
 
-    const totalOriginal = files.reduce((sum, file: any) => {
-      const size = file.file?.size ?? 0;
-      return sum + size;
-    }, 0);
-    setOriginalSize(totalOriginal > 0 ? totalOriginal : null);
+    const activeFile = files[0]?.file as File | undefined;
+    setOriginalSize(activeFile?.size ?? null);
     setCompressedSize(null);
 
     try {
       const formData = new FormData();
-      files.slice(0, 10).forEach((file: any) => {
-        if (file.file) {
-          formData.append("files", file.file, file.name ?? "file.pdf");
-        }
-      });
+      if (activeFile) {
+        formData.append("files", activeFile, activeFile.name ?? "file.pdf");
+      }
 
       // Pass quality (10–100) to backend so it can choose an appropriate compression level.
       formData.append("quality", String(quality[0] ?? 70));
 
-      await new Promise<void>((resolve, reject) => {
-        const xhr = new XMLHttpRequest();
-
-        xhr.open("POST", `${apiBase}/compress-pdf`);
-        xhr.responseType = "blob";
-
-        // Dummy loader: smoothly increase progress up to ~92% while request is in flight
-        const interval = window.setInterval(() => {
-          setProgress((prev) => {
-            if (prev >= 92) return prev;
-            const next = prev + 5;
-            return next > 92 ? 92 : next;
-          });
-        }, 120);
-
-        xhr.onload = () => {
-          window.clearInterval(interval);
-
-          if (xhr.status >= 200 && xhr.status < 300) {
-            const blob = xhr.response as Blob;
-            const url = URL.createObjectURL(blob);
-            setDownloadUrl(url);
-            setCompressedSize(blob.size);
-            setProgress(100);
-            setIsComplete(true);
-            resolve();
-          } else {
-            reject(new Error(`Request failed with status ${xhr.status}`));
-          }
-        };
-
-        xhr.onerror = () => {
-          window.clearInterval(interval);
-          reject(new Error("Network error while uploading files"));
-        };
-
-        xhr.send(formData);
+      const { blob } = await xhrUploadForBlob({
+        url: `${apiBase}/compress-pdf`,
+        formData,
+        onProgress: (p) => setProgress(p),
+        progressStart: 0,
+        progressCap: 92,
+        progressTickMs: 120,
+        progressTickAmount: 5,
       });
+
+      const url = URL.createObjectURL(blob);
+      setDownloadUrl(url);
+      setCompressedSize(blob.size);
+      setIsComplete(true);
     } catch (err) {
       console.error("Error compressing PDFs", err);
-      setError("Something went wrong while compressing your files. Please try again.");
+      if (err instanceof XhrUploadError) {
+        setError(err.message);
+      } else {
+        setError("Something went wrong while compressing your files. Please try again.");
+      }
     } finally {
       setIsProcessing(false);
     }
@@ -129,7 +106,7 @@ export default function CompressPDF() {
       : null;
 
   const allReady =
-    files.length >= 1 && files.every((file: any) => file.status === "complete");
+    files.length === 1 && files.every((file: any) => file.status === "complete");
   
   // Auto-scroll to upload area first, then compression options when files are ready
   useEffect(() => {
@@ -165,28 +142,21 @@ export default function CompressPDF() {
       <div className="mx-auto max-w-3xl">
         {!isComplete ? (
           isProcessing ? (
-            // Full-width compressing screen (similar to MergePDF loader)
-            <div ref={loadingRef} className="py-16 flex flex-col items-center gap-6">
-              <h2 className="text-2xl font-semibold">Compressing PDFs...</h2>
-              <div className="relative h-24 w-24">
-                <div className="h-24 w-24 rounded-full border-[6px] border-accent-foreground/10" />
-                <div className="absolute inset-0 rounded-full border-[6px] border-accent border-t-transparent animate-spin" />
-                <div className="absolute inset-0 flex items-center justify-center text-sm font-semibold">
-                  {progress}%
-                </div>
-              </div>
-              {error && (
-                <p className="mt-2 text-sm text-destructive text-center max-w-md">{error}</p>
-              )}
-            </div>
+            <ToolProcessingState
+              containerRef={loadingRef}
+              title="Compressing PDFs..."
+              progress={progress}
+              error={error}
+              color="accent"
+            />
           ) : (
             <>
               <div ref={uploadRef}>
                 <FileUploadZone
                   key={uploadKey}
                   accept=".pdf"
-                  multiple
-                  maxFiles={10}
+                  multiple={false}
+                  maxFiles={1}
                   onFilesChange={setFiles}
                 />
               </div>
@@ -223,7 +193,7 @@ export default function CompressPDF() {
                       </div>
                     </div>
 
-                    <div className="mt-6 grid grid-cols-4 gap-3">
+                    <div className="mt-6 grid grid-cols-2 sm:grid-cols-4 gap-3">
                       {[
                         { label: "Fast", value: 70, desc: "Quicker, lighter compression" },
                         { label: "Extreme", value: 20, desc: "Maximum size reduction" },
@@ -246,17 +216,18 @@ export default function CompressPDF() {
                     </div>
                   </div>
 
-                  <div className="flex flex-col items-center gap-4">
+                  <div className="flex flex-col items-center gap-4 w-full max-w-sm mx-auto px-2">
                     <Button
                       size="lg"
                       className="btn-hero bg-accent text-accent-foreground hover:bg-accent/90"
                       onClick={handleProcess}
                       disabled={isProcessing || !allReady}
+                      style={{ width: "100%" }}
                     >
                       Compress {files.length} PDF{files.length > 1 ? "s" : ""}
                       <ArrowRight className="h-5 w-5" />
                     </Button>
-                    <Button variant="ghost" onClick={handleReset}>
+                    <Button variant="ghost" onClick={handleReset} className="w-full">
                       <RotateCcw className="h-4 w-4 mr-2" />
                       Start over
                     </Button>
