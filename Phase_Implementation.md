@@ -182,6 +182,14 @@
 - Add loading states and error handling
 - Create help tooltips and documentation
 
+**Updates (Completed / Confirmed)**
+- Verify snow overlay visuals on Home + Features in light + dark.
+- Housekeeping: Browserslist DB update + npm audit fixes.
+- Backend: Investigated the HTTP 500 during dev startup and identified/resolved the triggering endpoint/service.
+- Enforce PDF -> Office conversions to a maximum of 50 pages total per request.
+  - Backend: `/convert/pdf-to-word`, `/convert/pdf-to-excel`, `/convert/pdf-to-powerpoint` now reject requests over 50 pages (HTTP 413).
+  - Frontend: `PDFToWord.tsx`, `PDFToExcel.tsx`, `PDFToPowerPoint.tsx` now set `maxTotalPages={50}` in `FileUploadZone` with tool-specific error messages.
+
 ### Backend
 - Optimize worker performance
 - Implement rate limiting
@@ -208,6 +216,10 @@
 - Deploy to production
 
 ## Recommended Next Steps (Post-Phase 2/3 Reality Check)
+
+## Current Status (What remains)
+
+- None (all currently tracked items completed).
 
 ### 1) Production deployment + environment hardening
 - Ensure production env vars are set for Adobe usage:
